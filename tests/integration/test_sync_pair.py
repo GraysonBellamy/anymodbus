@@ -14,6 +14,7 @@ backend is set process-wide.
 from __future__ import annotations
 
 import contextlib
+import math
 from typing import TYPE_CHECKING
 
 import pytest
@@ -114,7 +115,9 @@ def test_sync_read_float_roundtrip(
     bus, _slave = sync_pair
     bus.slave(1).write_float(10, 78.295)
     value = bus.slave(1).read_float(10)
-    assert value == pytest.approx(78.295, rel=1e-6)
+    # ``math.isclose`` over ``pytest.approx`` because the latter's stubs
+    # leak ``Unknown`` types under pyright strict mode.
+    assert math.isclose(value, 78.295, rel_tol=1e-6)
 
 
 def test_sync_broadcast_write_register(

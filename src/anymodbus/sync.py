@@ -434,20 +434,27 @@ class Slave:
         self,
         address: int,
         *,
-        register_count: int,
+        register_count: int | None = None,
+        byte_count: int | None = None,
+        byte_order: ByteOrder | None = None,
         encoding: str = "ascii",
         strip_null: bool = True,
         timeout: float | None = None,
     ) -> str:
-        """Sync read_string."""
+        """Sync read_string. Supply ``register_count`` *or* ``byte_count``."""
+        kwargs: dict[str, Any] = {
+            "encoding": encoding,
+            "strip_null": strip_null,
+        }
+        if register_count is not None:
+            kwargs["register_count"] = register_count
+        if byte_count is not None:
+            kwargs["byte_count"] = byte_count
+        if byte_order is not None:
+            kwargs["byte_order"] = byte_order
 
         async def _call() -> str:
-            return await self._async_slave.read_string(
-                address,
-                register_count=register_count,
-                encoding=encoding,
-                strip_null=strip_null,
-            )
+            return await self._async_slave.read_string(address, **kwargs)
 
         return _call_with_timeout(self._portal, _call, timeout)
 
@@ -456,21 +463,27 @@ class Slave:
         address: int,
         value: str,
         *,
-        register_count: int,
+        register_count: int | None = None,
+        byte_count: int | None = None,
+        byte_order: ByteOrder | None = None,
         encoding: str = "ascii",
         pad: bytes = b"\x00",
         timeout: float | None = None,
     ) -> None:
-        """Sync write_string."""
+        """Sync write_string. Supply ``register_count`` *or* ``byte_count``."""
+        kwargs: dict[str, Any] = {
+            "encoding": encoding,
+            "pad": pad,
+        }
+        if register_count is not None:
+            kwargs["register_count"] = register_count
+        if byte_count is not None:
+            kwargs["byte_count"] = byte_count
+        if byte_order is not None:
+            kwargs["byte_order"] = byte_order
 
         async def _call() -> None:
-            await self._async_slave.write_string(
-                address,
-                value,
-                register_count=register_count,
-                encoding=encoding,
-                pad=pad,
-            )
+            await self._async_slave.write_string(address, value, **kwargs)
 
         _call_with_timeout(self._portal, _call, timeout)
 

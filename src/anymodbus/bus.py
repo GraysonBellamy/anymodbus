@@ -123,7 +123,7 @@ class Bus:
     __slots__ = (
         "_closed",
         "_config",
-        "_inter_char_timeout",
+        "_inter_char_idle",
         "_inter_frame_idle",
         "_last_io_monotonic",
         "_lock",
@@ -145,7 +145,7 @@ class Bus:
         # Lazy-resolved on first use; the stream may not have its config set
         # at __init__ time (e.g. it gets reconfigured before first I/O).
         self._inter_frame_idle: float = 0.0
-        self._inter_char_timeout: float = 0.0
+        self._inter_char_idle: float = 0.0
         self._timing_resolved = False
 
     @property
@@ -360,10 +360,10 @@ class Bus:
             self._inter_frame_idle = float(timing.inter_frame_idle)
         else:
             self._inter_frame_idle = _t35_for_baud(baud)
-        if isinstance(timing.inter_char_timeout, (int, float)):
-            self._inter_char_timeout = float(timing.inter_char_timeout)
+        if isinstance(timing.inter_char_idle, (int, float)):
+            self._inter_char_idle = float(timing.inter_char_idle)
         else:
-            self._inter_char_timeout = _t15_for_baud(baud)
+            self._inter_char_idle = _t15_for_baud(baud)
         self._timing_resolved = True
 
     async def _await_inter_frame_gap(self) -> None:
@@ -428,7 +428,7 @@ class Bus:
                         self._stream,
                         expected_slave_address=slave_address,
                         expected_function_code=expected_function_code,
-                        inter_char_timeout=self._inter_char_timeout,
+                        inter_char_idle=self._inter_char_idle,
                     )
             except TimeoutError as e:
                 msg = (

@@ -78,7 +78,7 @@ src/anymodbus/
 ├── framer.py              # Length-aware ADU reader + ADU writer; uses crc + pdu
 ├── bus.py                 # Bus class — owns stream, lock, transactions
 ├── slave.py               # Slave handle bound to (bus, address); high-level methods
-├── decoders.py            # Float/int32/string helpers with word/byte-order knobs
+├── decoders.py            # int16/32/64 + float32/64 + string helpers, plus type-dispatched decode/encode
 ├── stream.py              # open_modbus_rtu(path, ...) convenience opener
 ├── sync.py                # Blocking wrappers; reuses anyserial portal hook
 ├── testing.py             # MockSlave, client_slave_pair, FaultPlan re-export
@@ -141,7 +141,7 @@ await slave.mask_write_register(addr, and_mask=..., or_mask=...) # FC 0x16
 await slave.read_write_registers(read_addr, read_count,
                                  write_addr, write_values)       # FC 0x17
 
-# Float / int32 helpers (in anymodbus.decoders, also exposed on Slave):
+# Per-type helpers + dispatcher (in anymodbus.decoders, also exposed on Slave for the common cases):
 hv = await slave.read_float(0x0040)                              # high_low default
 lv = await slave.read_float(0x0044, word_order="low_high")
 await slave.write_float(0x0040, 78.295, word_order="high_low")
@@ -397,7 +397,6 @@ Mirrors anyserial's multi-inheritance idiom. All inherit `ModbusError` plus a st
 | `CRCError` | `ProtocolError` | CRC mismatch |
 | `FrameError` | `ProtocolError` | Truncated, junk between frames |
 | `FrameTimeoutError` | `ModbusError, TimeoutError` | No response within deadline |
-| `BusBusyError` | `ModbusError, anyio.BusyResourceError` | Concurrent txn attempt without lock |
 | `ConnectionLostError` | `ModbusError, anyio.BrokenResourceError` | Stream disconnected mid-txn |
 | `BusClosedError` | `ModbusError, anyio.ClosedResourceError` | Bus closed |
 | `UnexpectedResponseError` | `ProtocolError` | Slave addr or FC echoed doesn't match request |
@@ -419,12 +418,12 @@ Modbus *exception responses* (function code with high bit set, body = an excepti
 | 0x0A | `GatewayPathUnavailableError` |
 | 0x0B | `GatewayTargetFailedToRespondError` |
 
-Any code outside this set (notably 0x07, 0x09, and 0x0C–0xFF, which are unassigned in v1.1b3) raises `ModbusUnknownExceptionError`, which carries the raw byte:
+Any code outside this set (notably 0x07, 0x09, and 0x0C–0xFF, which are unassigned in v1.1b3) raises `ModbusUnknownExceptionError`, which inherits from `ModbusExceptionResponse` so callers wanting "any slave-returned exception" can catch the base class. The raw byte is exposed on `exception_code` (inherited from the base):
 
 ```python
-class ModbusUnknownExceptionError(ModbusError):
+class ModbusUnknownExceptionError(ModbusExceptionResponse):
     """Slave returned an exception code not defined by app §7."""
-    code: int   # raw byte value
+    # inherits exception_code: int from ModbusExceptionResponse
 ```
 
 This is intentionally not a `ProtocolError` — the slave returned a well-formed exception ADU; we just don't have a named class for the code it chose. Callers who need to handle a specific legacy code (e.g. NAK on Modicon devices) can match on `err.code == 0x07`.
@@ -525,13 +524,27 @@ class ByteOrder(StrEnum):
     BIG = "big"                # within each 16-bit word — Modbus spec (App Protocol §4.2)
     LITTLE = "little"          # rare, seen on some devices
 
-def decode_float32(words: Sequence[int], *,
-                   word_order: WordOrder = WordOrder.HIGH_LOW,
-                   byte_order: ByteOrder = ByteOrder.BIG) -> float: ...
-def encode_float32(value: float, *, word_order=..., byte_order=...) -> tuple[int, int]: ...
-def decode_int32(...): ...
-def encode_int32(...): ...
-def decode_string(words, *, encoding="ascii", strip_null=True) -> str: ...
+class RegisterType(StrEnum):
+    INT16 = "int16"; UINT16 = "uint16"
+    INT32 = "int32"; UINT32 = "uint32"
+    INT64 = "int64"; UINT64 = "uint64"
+    FLOAT32 = "float32"; FLOAT64 = "float64"
+    STRING = "string"
+
+# Per-type helpers (also exposed on Slave for the common-case helpers):
+def decode_float32(words, *, word_order=HIGH_LOW, byte_order=BIG) -> float: ...
+def encode_float32(value, *, word_order=..., byte_order=...) -> tuple[int, int]: ...
+def decode_float64(...): ...; def encode_float64(...): ...
+def decode_int16(...): ...; def encode_int16(...): ...
+def decode_int32(...): ...; def encode_int32(...): ...
+def decode_int64(...): ...; def encode_int64(...): ...
+def decode_string(words, *, byte_order=BIG, encoding="ascii", strip_null=True) -> str: ...
+def encode_string(value, *, register_count=None, byte_count=None, byte_order=BIG, ...): ...
+
+# Type-dispatched single entry point — the recommended API for downstream
+# device libraries that drive a register schema from configuration:
+def decode(words, *, type: RegisterType, word_order=..., byte_order=..., ...) -> int | float | str: ...
+def encode(value, *, type: RegisterType, register_count=None, byte_count=None, ...) -> tuple[int, ...]: ...
 ```
 
 All four (word_order × byte_order) combinations are covered. Defaults are high-word-first, big-endian within word — equivalent to ``struct.pack(">f", ...)``. The Modbus Application Protocol spec (§4.2) defines big-endian byte ordering *within* a single 16-bit register but does **not** standardize multi-register word ordering: that's vendor-defined. ``HIGH_LOW`` is simply the most common convention. minimalmodbus uses 0..3 magic numbers; we use named enums for clarity at call sites. Downstream device libraries layer their vendor-specific defaults on top by passing the order explicitly.
@@ -728,7 +741,7 @@ anymodbus/
 - Bus + Slave + Framer + CRC + length-aware reader.
 - Exception hierarchy + code translator (`ConfigurationError` separated from `ProtocolError`).
 - RetryPolicy with idempotent-only default and `retry_on` filter.
-- Decoders: float32, int32, string with `WordOrder` / `ByteOrder` enums (most-common-convention defaults).
+- Decoders: int16/int32/int64 (signed and unsigned), float32/float64, and string, with `WordOrder` / `ByteOrder` enums (most-common-convention defaults). A type-dispatched `decode(words, type=RegisterType.X, ...)` / `encode(value, type=RegisterType.X, ...)` pair is the recommended entry point for downstream device libraries that drive a register schema from configuration.
 - Sync wrapper.
 - Broadcast helpers (`Bus.broadcast_*`) honouring `timing.broadcast_turnaround`.
 - `MockSlave` + `client_slave_pair` + concurrency tests.

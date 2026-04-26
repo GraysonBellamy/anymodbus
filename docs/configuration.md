@@ -23,7 +23,7 @@ All are immutable; use `.with_changes(**fields)` to derive a new instance. Inval
 | Field | Default | Notes |
 |---|---|---|
 | `inter_frame_idle` | `"auto"` | Pre-tx idle gap. `"auto"` → `max(3.5 * 11 / baud, 1.75 ms)` (Serial Line spec §2.5.1.1). Pass a float to override. |
-| `inter_char_timeout` | `"auto"` | Rx-side idle gap for the unknown-FC fallback path only (1.5 char-times). |
+| `inter_char_idle` | `"auto"` | Rx-side idle gap for the unknown-FC fallback path only (1.5 char-times). |
 | `post_tx_settle` | `0.0` | Optional delay after `send` returns and before reading. Some RS-485 transceivers benefit from 1-2 ms. |
 | `broadcast_turnaround` | `0.1` | Seconds the bus must remain idle after a broadcast (slave_address=0) write. Spec calls this the "Turnaround delay" (§2.4.1) and recommends 100-200 ms so every slave finishes processing. The 3.5-char gap alone is insufficient for broadcasts. |
 

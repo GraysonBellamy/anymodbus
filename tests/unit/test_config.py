@@ -74,14 +74,14 @@ class TestTimingConfig:
     def test_defaults_use_auto(self) -> None:
         tc = TimingConfig()
         assert tc.inter_frame_idle == "auto"
-        assert tc.inter_char_timeout == "auto"
+        assert tc.inter_char_idle == "auto"
         assert tc.post_tx_settle == 0.0
         assert tc.broadcast_turnaround == 0.1
 
     def test_explicit_numeric_accepted(self) -> None:
-        tc = TimingConfig(inter_frame_idle=0.005, inter_char_timeout=0.002)
+        tc = TimingConfig(inter_frame_idle=0.005, inter_char_idle=0.002)
         assert tc.inter_frame_idle == 0.005
-        assert tc.inter_char_timeout == 0.002
+        assert tc.inter_char_idle == 0.002
 
     def test_negative_idle_rejected(self) -> None:
         with pytest.raises(ConfigurationError):
@@ -89,7 +89,7 @@ class TestTimingConfig:
 
     def test_negative_char_timeout_rejected(self) -> None:
         with pytest.raises(ConfigurationError):
-            TimingConfig(inter_char_timeout=-0.001)
+            TimingConfig(inter_char_idle=-0.001)
 
     def test_negative_settle_rejected(self) -> None:
         with pytest.raises(ConfigurationError):

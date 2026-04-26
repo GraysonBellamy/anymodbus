@@ -277,30 +277,62 @@ class Slave:
         self,
         address: int,
         *,
-        register_count: int,
+        register_count: int | None = None,
+        byte_count: int | None = None,
+        byte_order: ByteOrder = ByteOrder.BIG,
         encoding: str = "ascii",
         strip_null: bool = True,
     ) -> str:
-        """Read ``register_count`` registers and decode the bytes as a string."""
-        words = await self.read_holding_registers(address, count=register_count)
-        return decode_string(words, encoding=encoding, strip_null=strip_null)
+        """Read a string field. Specify length as ``register_count`` or ``byte_count``.
+
+        ``byte_count`` is convenient for spec'd-in-bytes fields whose length
+        isn't a multiple of two: the read is rounded up to
+        ``ceil(byte_count / 2)`` registers and the decoded string is then
+        truncated to ``byte_count`` bytes (before optional null-stripping).
+        Exactly one of ``register_count`` / ``byte_count`` must be supplied.
+
+        ``byte_order=LITTLE`` is for devices that store strings byte-swapped
+        within each register.
+        """
+        if (register_count is None) == (byte_count is None):
+            msg = "supply exactly one of register_count or byte_count"
+            raise ConfigurationError(msg)
+        if register_count is None:
+            assert byte_count is not None
+            count = (byte_count + 1) // 2
+        else:
+            count = register_count
+        words = await self.read_holding_registers(address, count=count)
+        decoded = decode_string(words, byte_order=byte_order, encoding=encoding, strip_null=False)
+        if byte_count is not None:
+            decoded = decoded[:byte_count]
+        if strip_null:
+            decoded = decoded.rstrip("\x00")
+        return decoded
 
     async def write_string(
         self,
         address: int,
         value: str,
         *,
-        register_count: int,
+        register_count: int | None = None,
+        byte_count: int | None = None,
+        byte_order: ByteOrder = ByteOrder.BIG,
         encoding: str = "ascii",
         pad: bytes = b"\x00",
     ) -> None:
-        """Encode ``value`` into ``register_count`` registers and write them.
+        """Encode ``value`` and write it. Length specified as registers or bytes.
 
-        The encoded byte length must not exceed ``register_count * 2``;
-        shorter encodings are right-padded with the single byte ``pad``
-        (default null) per :func:`anymodbus.decoders.encode_string`.
+        See :func:`anymodbus.decoders.encode_string` for the encoding rules.
         """
-        words = encode_string(value, register_count=register_count, encoding=encoding, pad=pad)
+        words = encode_string(
+            value,
+            register_count=register_count,
+            byte_count=byte_count,
+            byte_order=byte_order,
+            encoding=encoding,
+            pad=pad,
+        )
         await self.write_registers(address, words)
 
     # ------------------------------------------------------------------

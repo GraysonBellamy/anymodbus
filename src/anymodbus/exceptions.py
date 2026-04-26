@@ -192,35 +192,27 @@ class GatewayTargetFailedToRespondError(ModbusExceptionResponse):
     default_code = ExceptionCode.GATEWAY_TARGET_FAILED_TO_RESPOND
 
 
-class ModbusUnknownExceptionError(ModbusError):
+class ModbusUnknownExceptionError(ModbusExceptionResponse):
     """Slave returned an exception code not assigned by *app §7*.
 
     The slave returned a well-formed exception ADU; we just don't have a named
-    class for the code it chose. The raw byte is preserved on
-    :attr:`code` so callers can match on it.
+    subclass for the code it chose. The raw byte is preserved on
+    :attr:`exception_code` (inherited from :class:`ModbusExceptionResponse`),
+    so callers wanting "any slave-returned exception" can simply
+    ``except ModbusExceptionResponse`` and branch on
+    :attr:`exception_code` if needed.
 
     The notable case is **0x07 (Negative Acknowledge)**: pre-v1.1 Modicon
     controllers used 0x07, but v1.1b3 §7 does not list it (the NAK semantic
     was repositioned as a Diagnostics counter, FC 0x08 sub 0x10). Anything a
-    legacy device emits as 0x07 surfaces here with ``code == 0x07``;
-    downstream device libraries that target old Modicon hardware can subclass
-    or branch on the code as needed.
+    legacy device emits as 0x07 surfaces here with
+    ``exception_code == 0x07``; downstream device libraries that target old
+    Modicon hardware can subclass or branch on the code as needed.
     """
 
-    def __init__(
-        self,
-        *,
-        function_code: int,
-        code: int,
-        message: str | None = None,
-    ) -> None:
-        self.function_code: int = function_code
-        self.code: int = code
-        text = message or (
-            f"slave returned unassigned exception code {code:#04x} "
-            f"for function code {function_code:#04x}"
-        )
-        super().__init__(text)
+    # No ``default_code``: this class is only ever instantiated with an
+    # explicit ``exception_code`` from the wire.
+    default_code = None
 
 
 _EXCEPTION_CODE_TO_CLASS: dict[int, type[ModbusExceptionResponse]] = {
@@ -241,14 +233,15 @@ def code_to_exception(
     function_code: int,
     exception_code: int,
     message: str | None = None,
-) -> ModbusError:
+) -> ModbusExceptionResponse:
     """Build the right exception class for a Modbus exception-response code.
 
     Codes assigned by *app §7* (1-6, 8, 10, 11) dispatch to the matching
     :class:`ModbusExceptionResponse` subclass. Anything else — including
     legacy 0x07 (Negative Acknowledge) and the unassigned 0x09 / 0x0C-0xFF
-    range — surfaces as :class:`ModbusUnknownExceptionError`, with the raw
-    byte preserved on :attr:`ModbusUnknownExceptionError.code`.
+    range — surfaces as :class:`ModbusUnknownExceptionError`, which is also
+    a :class:`ModbusExceptionResponse`, with the raw byte preserved on
+    :attr:`ModbusExceptionResponse.exception_code`.
 
     Args:
         function_code: The function-code byte from the response (the high
@@ -260,13 +253,7 @@ def code_to_exception(
     Returns:
         An exception instance ready to ``raise``.
     """
-    cls = _EXCEPTION_CODE_TO_CLASS.get(exception_code)
-    if cls is None:
-        return ModbusUnknownExceptionError(
-            function_code=function_code,
-            code=exception_code,
-            message=message,
-        )
+    cls = _EXCEPTION_CODE_TO_CLASS.get(exception_code, ModbusUnknownExceptionError)
     return cls(
         function_code=function_code,
         exception_code=exception_code,

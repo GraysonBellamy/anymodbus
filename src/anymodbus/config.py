@@ -38,7 +38,7 @@ class TimingConfig:
             ``max(3.5 * 11 / baudrate, 0.00175)`` from the stream's current
             baud (looked up via :class:`anyserial.SerialStreamAttribute`); a
             float value is taken literally. Defaults to ``"auto"``.
-        inter_char_timeout: Maximum idle gap **within** a frame, used only on
+        inter_char_idle: Maximum idle gap **within** a frame, used only on
             the unknown-FC fallback rx path. Defaults to ``"auto"``
             (1.5 character-times).
         post_tx_settle: Optional fixed wait after ``send`` returns and before
@@ -51,7 +51,7 @@ class TimingConfig:
     """
 
     inter_frame_idle: float | AutoTiming = "auto"
-    inter_char_timeout: float | AutoTiming = "auto"
+    inter_char_idle: float | AutoTiming = "auto"
     post_tx_settle: float = 0.0
     broadcast_turnaround: float = _DEFAULT_BROADCAST_TURNAROUND
 
@@ -61,10 +61,8 @@ class TimingConfig:
             raise ConfigurationError(
                 f"inter_frame_idle must be >= 0 (got {self.inter_frame_idle!r})"
             )
-        if isinstance(self.inter_char_timeout, (int, float)) and self.inter_char_timeout < 0:
-            raise ConfigurationError(
-                f"inter_char_timeout must be >= 0 (got {self.inter_char_timeout!r})"
-            )
+        if isinstance(self.inter_char_idle, (int, float)) and self.inter_char_idle < 0:
+            raise ConfigurationError(f"inter_char_idle must be >= 0 (got {self.inter_char_idle!r})")
         if self.post_tx_settle < 0:
             raise ConfigurationError(f"post_tx_settle must be >= 0 (got {self.post_tx_settle!r})")
         if self.broadcast_turnaround < 0:

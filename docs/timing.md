@@ -7,13 +7,13 @@
 | Gap | Symbol | Spec value | Where it's used | Config field |
 |-----|--------|-----------|-----------------|--------------|
 | Inter-frame idle | t3.5 | ≥ 3.5 char-times of silence between frames | Held **before every tx** to satisfy *serial §2.5.1.1* | `inter_frame_idle` |
-| Inter-character idle | t1.5 | ≤ 1.5 char-times within a frame | Used by the unknown-FC gap-based reader and the unexpected-slave drain branch in [framing.md](framing.md) | `inter_char_timeout` |
+| Inter-character idle | t1.5 | ≤ 1.5 char-times within a frame | Used by the unknown-FC gap-based reader and the unexpected-slave drain branch in [framing.md](framing.md) | `inter_char_idle` |
 
 Both default to the sentinel `"auto"`, which computes from the stream's current baud:
 
 ```
-inter_frame_idle  = max(3.5 * 11 / baudrate, 0.00175)   # 1.75 ms floor
-inter_char_timeout = max(1.5 * 11 / baudrate, 0.00075)  # 0.75 ms floor
+inter_frame_idle = max(3.5 * 11 / baudrate, 0.00175)  # 1.75 ms floor
+inter_char_idle  = max(1.5 * 11 / baudrate, 0.00075)  # 0.75 ms floor
 ```
 
 Per-baud floors of 1.75 ms / 0.75 ms come from *serial §2.5.1.1*: at baud > 19200 the per-character interrupt load otherwise becomes prohibitive, so the spec recommends fixed values.
@@ -71,7 +71,7 @@ If the stream isn't a serial port (e.g. `client_slave_pair` for tests, or the fu
 ```python
 from anymodbus import BusConfig, TimingConfig
 
-cfg = BusConfig(timing=TimingConfig(inter_frame_idle=0.001, inter_char_timeout=0.0005))
+cfg = BusConfig(timing=TimingConfig(inter_frame_idle=0.001, inter_char_idle=0.0005))
 ```
 
 ## RS-485 considerations
