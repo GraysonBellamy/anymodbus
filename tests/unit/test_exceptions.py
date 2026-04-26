@@ -101,7 +101,7 @@ class TestCodeToException:
         # here, not as a dedicated class.
         exc = code_to_exception(function_code=0x03, exception_code=code)
         assert isinstance(exc, ModbusUnknownExceptionError)
-        assert exc.code == code
+        assert exc.exception_code == code
         assert exc.function_code == 0x03
 
     def test_unknown_exception_is_modbus_error_not_protocol_error(self) -> None:
@@ -111,10 +111,12 @@ class TestCodeToException:
         # That's not a wire-level protocol violation.
         assert not isinstance(exc, ProtocolError)
 
-    def test_unknown_exception_is_not_a_modbus_exception_response(self) -> None:
-        # The standalone class doesn't pretend to be one of the named §7 codes.
+    def test_unknown_exception_is_a_modbus_exception_response(self) -> None:
+        # ``ModbusUnknownExceptionError`` is now a subclass of
+        # ``ModbusExceptionResponse`` so callers wanting "any slave-returned
+        # exception" can ``except ModbusExceptionResponse`` and be done.
         exc = code_to_exception(function_code=0x03, exception_code=0x07)
-        assert not isinstance(exc, ModbusExceptionResponse)
+        assert isinstance(exc, ModbusExceptionResponse)
 
     def test_all_exception_responses_are_modbus_errors(self) -> None:
         exc = code_to_exception(function_code=0x03, exception_code=0x02)

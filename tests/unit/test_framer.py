@@ -144,7 +144,7 @@ class TestNormalFlow:
             _stream(adu),
             expected_slave_address=0x11,
             expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-            inter_char_timeout=_INTER_CHAR_GAP_S,
+            inter_char_idle=_INTER_CHAR_GAP_S,
         )
         assert slave == 0x11
         assert returned_pdu == pdu
@@ -157,7 +157,7 @@ class TestNormalFlow:
             _stream(adu),
             expected_slave_address=0x01,
             expected_function_code=FunctionCode.READ_INPUT_REGISTERS,
-            inter_char_timeout=_INTER_CHAR_GAP_S,
+            inter_char_idle=_INTER_CHAR_GAP_S,
         )
         assert slave == 0x01
         assert decode_read_input_registers_response(returned_pdu) == (0x000A,)
@@ -169,7 +169,7 @@ class TestNormalFlow:
             _stream(adu),
             expected_slave_address=0x11,
             expected_function_code=FunctionCode.WRITE_SINGLE_REGISTER,
-            inter_char_timeout=_INTER_CHAR_GAP_S,
+            inter_char_idle=_INTER_CHAR_GAP_S,
         )
         assert slave == 0x11
         assert decode_write_single_register_response(returned_pdu) == (0x0001, 0x0003)
@@ -181,7 +181,7 @@ class TestNormalFlow:
             _stream(adu),
             expected_slave_address=0x07,
             expected_function_code=FunctionCode.WRITE_MULTIPLE_REGISTERS,
-            inter_char_timeout=_INTER_CHAR_GAP_S,
+            inter_char_idle=_INTER_CHAR_GAP_S,
         )
         assert slave == 0x07
         assert returned_pdu == pdu
@@ -197,7 +197,7 @@ class TestNormalFlow:
                 _stream(adu),
                 expected_slave_address=0x11,
                 expected_function_code=FunctionCode.WRITE_SINGLE_REGISTER,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
         assert any("rx" in r.message and adu.hex() in r.message for r in caplog.records)
 
@@ -210,7 +210,7 @@ class TestNormalFlow:
             _stream(*chunks),
             expected_slave_address=0x11,
             expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-            inter_char_timeout=_INTER_CHAR_GAP_S,
+            inter_char_idle=_INTER_CHAR_GAP_S,
         )
         assert slave == 0x11
 
@@ -232,7 +232,7 @@ class TestExceptionResponses:
                 _stream(adu),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
         assert ei.value.function_code == 0x03
         assert ei.value.exception_code == 0x01
@@ -245,7 +245,7 @@ class TestExceptionResponses:
                 _stream(adu),
                 expected_slave_address=0x05,
                 expected_function_code=FunctionCode.WRITE_SINGLE_REGISTER,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_slave_device_failure_response(self) -> None:
@@ -256,7 +256,7 @@ class TestExceptionResponses:
                 _stream(adu),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_unassigned_exception_code_returns_unknown_class(self) -> None:
@@ -269,9 +269,9 @@ class TestExceptionResponses:
                 _stream(adu),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
-        assert ei.value.code == 0x07
+        assert ei.value.exception_code == 0x07
         assert ei.value.function_code == 0x03
 
     async def test_bad_crc_on_exception_raises_crc_error_not_exception(self) -> None:
@@ -287,7 +287,7 @@ class TestExceptionResponses:
                 _stream(corrupted),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_exception_with_fc_mismatch(self) -> None:
@@ -300,7 +300,7 @@ class TestExceptionResponses:
                 expected_slave_address=0x01,
                 # We sent FC 3, but the exception echoes FC 6.
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
 
@@ -320,7 +320,7 @@ class TestProtocolValidation:
                 _stream(forged),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_oversized_byte_count_rejected(self) -> None:
@@ -335,7 +335,7 @@ class TestProtocolValidation:
                 _stream(forged),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_max_byte_count_250_accepted(self) -> None:
@@ -350,7 +350,7 @@ class TestProtocolValidation:
                 _stream(forged),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_mismatched_fc_raises_unexpected_response(self) -> None:
@@ -362,7 +362,7 @@ class TestProtocolValidation:
                 _stream(adu),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_bad_crc_on_normal_response(self) -> None:
@@ -373,7 +373,7 @@ class TestProtocolValidation:
                 _stream(_flip_last_byte(adu)),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_truncated_frame_raises_frame_error(self) -> None:
@@ -383,7 +383,7 @@ class TestProtocolValidation:
                 _stream(bytes([0x01, 0x03, 0x04])),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_truncated_header_raises_frame_error(self) -> None:
@@ -393,7 +393,7 @@ class TestProtocolValidation:
                 _stream(bytes([0x01])),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
 
@@ -436,7 +436,7 @@ class TestKnownUnsupportedFunctionCodes:
                 _stream(forged),
                 expected_slave_address=0x01,
                 expected_function_code=cast("FunctionCode", fc),
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_unsupported_fc_returned_when_supported_expected(self) -> None:
@@ -450,7 +450,7 @@ class TestKnownUnsupportedFunctionCodes:
                 _stream(forged),
                 expected_slave_address=0x01,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
 
@@ -472,14 +472,14 @@ class TestStraySlaveDrain:
         stray_adu = _adu(0x05, stray_pdu)
         valid_pdu = bytes([0x03, 0x02, 0x00, 0x42])
         valid_adu = _adu(0x01, valid_pdu)
-        # Insert an inter-frame silence > inter_char_timeout so the drain's
+        # Insert an inter-frame silence > inter_char_idle so the drain's
         # gap timer fires between the two frames, just like real RTU traffic
         # respecting the t3.5 inter-frame gap.
         slave, pdu = await read_response_adu(
             _stream(stray_adu, _INTER_CHAR_GAP_S * 4, valid_adu),
             expected_slave_address=0x01,
             expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
-            inter_char_timeout=_INTER_CHAR_GAP_S,
+            inter_char_idle=_INTER_CHAR_GAP_S,
         )
         assert slave == 0x01
         assert pdu == valid_pdu
@@ -508,7 +508,7 @@ class TestSpecGotchas:
             _stream(adu),
             expected_slave_address=0x01,
             expected_function_code=FunctionCode.MASK_WRITE_REGISTER,
-            inter_char_timeout=_INTER_CHAR_GAP_S,
+            inter_char_idle=_INTER_CHAR_GAP_S,
         )
         assert slave == 0x01
         assert returned_pdu == pdu
@@ -530,7 +530,7 @@ class TestSpecGotchas:
                 _stream(adu),
                 expected_slave_address=0x09,
                 expected_function_code=fc,
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
             assert slave == 0x09
             assert returned_pdu == pdu
@@ -556,7 +556,7 @@ class TestUnknownFcFallback:
             _stream(adu),
             expected_slave_address=0x01,
             expected_function_code=cast("FunctionCode", 0x65),
-            inter_char_timeout=_INTER_CHAR_GAP_S,
+            inter_char_idle=_INTER_CHAR_GAP_S,
         )
         assert slave == 0x01
         assert returned_pdu == pdu
@@ -569,7 +569,7 @@ class TestUnknownFcFallback:
                 _stream(forged),
                 expected_slave_address=0x01,
                 expected_function_code=cast("FunctionCode", 0x65),
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_unknown_fc_idle_gap_terminates_read(self) -> None:
@@ -585,7 +585,7 @@ class TestUnknownFcFallback:
             _stream(head, rest, hold_open=True),
             expected_slave_address=0x01,
             expected_function_code=cast("FunctionCode", 0x65),
-            inter_char_timeout=_INTER_CHAR_GAP_S,
+            inter_char_idle=_INTER_CHAR_GAP_S,
         )
         assert slave == 0x01
         assert returned_pdu == pdu
@@ -620,7 +620,7 @@ class TestUnknownFcFallback:
             ),
             expected_slave_address=0x01,
             expected_function_code=cast("FunctionCode", 0x65),
-            inter_char_timeout=gap,
+            inter_char_idle=gap,
         )
         assert slave == 0x01
         assert returned_pdu == pdu
@@ -634,7 +634,7 @@ class TestUnknownFcFallback:
                 _stream(forged),
                 expected_slave_address=0x01,
                 expected_function_code=cast("FunctionCode", 0x65),
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_unknown_fc_caps_runaway_payload_at_spec_max(self) -> None:
@@ -651,7 +651,7 @@ class TestUnknownFcFallback:
                 _stream(head, runaway, hold_open=True),
                 expected_slave_address=0x01,
                 expected_function_code=cast("FunctionCode", 0x65),
-                inter_char_timeout=_INTER_CHAR_GAP_S,
+                inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
 
@@ -687,7 +687,7 @@ async def test_hypothesis_register_response_round_trip(
         _stream(adu),
         expected_slave_address=slave_address,
         expected_function_code=fc,
-        inter_char_timeout=_INTER_CHAR_GAP_S,
+        inter_char_idle=_INTER_CHAR_GAP_S,
     )
     assert slave == slave_address
     if fc is FunctionCode.READ_HOLDING_REGISTERS:

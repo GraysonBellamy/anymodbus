@@ -234,7 +234,7 @@ async def read_response_adu(  # noqa: PLR0912, PLR0915 — state machine; splitt
     *,
     expected_slave_address: int,
     expected_function_code: FunctionCode,
-    inter_char_timeout: float,
+    inter_char_idle: float,
 ) -> tuple[int, bytes]:
     """Read one response ADU from ``stream`` using the length-aware state machine.
 
@@ -262,7 +262,7 @@ async def read_response_adu(  # noqa: PLR0912, PLR0915 — state machine; splitt
             exception responses (FC | 0x80) from normal responses, to pick
             the correct length-aware branch, and to surface mismatches via
             :class:`UnexpectedResponseError`.
-        inter_char_timeout: Seconds of idle time on the rx side that signals
+        inter_char_idle: Seconds of idle time on the rx side that signals
             end-of-frame for the unknown-FC fallback path and the
             unexpected-slave drain.
 
@@ -286,7 +286,7 @@ async def read_response_adu(  # noqa: PLR0912, PLR0915 — state machine; splitt
             # *serial §2.4.1*: a reply addressed to a different slave does NOT
             # abort the transaction. Drain the stray frame using a t1.5 idle
             # gap and keep waiting under the same enclosing deadline.
-            await _read_until_idle(stream, gap=inter_char_timeout)
+            await _read_until_idle(stream, gap=inter_char_idle)
             _LOGGER.info(
                 "Discarded stray frame from slave 0x%02x (expecting 0x%02x)",
                 slave,
@@ -348,7 +348,7 @@ async def read_response_adu(  # noqa: PLR0912, PLR0915 — state machine; splitt
         # Truly unknown FC (user-defined ranges 65-72 / 100-110, vendor
         # private). Fall back to the t1.5 gap-based reader; imprecise but the
         # only option without per-FC length knowledge.
-        tail = await _read_until_idle(stream, gap=inter_char_timeout)
+        tail = await _read_until_idle(stream, gap=inter_char_idle)
         if len(tail) < _CRC_LEN:
             msg = (
                 f"FC {fc:#04x} response truncated: only {len(tail)} byte(s) "

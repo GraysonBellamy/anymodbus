@@ -108,6 +108,31 @@ class ExceptionCode(IntEnum):
     GATEWAY_TARGET_FAILED_TO_RESPOND = 0x0B
 
 
+class RegisterType(StrEnum):
+    """Generic register-encoded value types supported by the codec dispatcher.
+
+    See :func:`anymodbus.decoders.decode` / :func:`anymodbus.decoders.encode`
+    for the unified API. Single-register integer types ignore ``word_order``;
+    :attr:`STRING` ignores ``word_order`` (bytes are read in their natural
+    order) but honours ``byte_order`` for devices that swap bytes within each
+    register.
+
+    Vendor-private encodings (BCD, packed nibbles, low-byte-only ASCII, etc.)
+    are intentionally out of scope for the generic dispatcher — they belong in
+    device-specific codec layers downstream.
+    """
+
+    INT16 = "int16"
+    UINT16 = "uint16"
+    INT32 = "int32"
+    UINT32 = "uint32"
+    INT64 = "int64"
+    UINT64 = "uint64"
+    FLOAT32 = "float32"
+    FLOAT64 = "float64"
+    STRING = "string"
+
+
 class WordOrder(StrEnum):
     """Word ordering for 32-bit values spread across two 16-bit registers.
 
@@ -157,6 +182,7 @@ __all__ = [
     "Capability",
     "ExceptionCode",
     "FunctionCode",
+    "RegisterType",
     "WordOrder",
     "is_idempotent_function",
     "is_read_function",
