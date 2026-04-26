@@ -1,0 +1,278 @@
+[build-system]
+requires = ["hatchling>=1.29.0", "hatch-vcs>=0.5.0"]
+build-backend = "hatchling.build"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+
+[project]
+name = "anymodbus"
+dynamic = ["version"]
+description = "Async-native Modbus RTU client for Python, built on AnyIO and anyserial."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Grayson Bellamy", email = "gbellamy@umd.edu" },
+]
+keywords = [
+    "modbus",
+    "modbus-rtu",
+    "rs485",
+    "industrial",
+    "scada",
+    "async",
+    "anyio",
+    "serial",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AnyIO",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Communications",
+    "Topic :: System :: Hardware",
+    "Topic :: Terminals :: Serial",
+    "Typing :: Typed",
+]
+dependencies = [
+    "anyio>=4.13",
+    "anyserial>=0.1.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/GraysonBellamy/anymodbus"
+Documentation = "https://graysonbellamy.github.io/anymodbus/"
+Repository = "https://github.com/GraysonBellamy/anymodbus"
+Issues = "https://github.com/GraysonBellamy/anymodbus/issues"
+Changelog = "https://github.com/GraysonBellamy/anymodbus/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+trio = ["trio>=0.27"]
+
+# ---------------------------------------------------------------------------
+# Hatch build
+# ---------------------------------------------------------------------------
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/anymodbus/_version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/anymodbus",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "DESIGN.md",
+    "pyproject.toml",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/anymodbus"]
+
+# ---------------------------------------------------------------------------
+# uv — dependency groups (PEP 735)
+# ---------------------------------------------------------------------------
+
+[dependency-groups]
+dev = [
+    { include-group = "lint" },
+    { include-group = "type" },
+    { include-group = "test" },
+    { include-group = "docs" },
+    "pre-commit>=4.0",
+]
+lint = [
+    "ruff>=0.8",
+]
+type = [
+    "mypy>=1.13",
+    "pyright>=1.1.390",
+]
+test = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "coverage[toml]>=7.13.5",
+    "hypothesis>=6.120",
+    "trio>=0.27",
+]
+bench = [
+    "pytest-benchmark>=4.0",
+]
+docs = [
+    "zensical>=0.0.33",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff — lint + format
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+extend-exclude = ["src/anymodbus/_version.py"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "UP",    # pyupgrade
+    "SIM",   # flake8-simplify
+    "PL",    # pylint
+    "RUF",   # ruff-specific
+    "PTH",   # flake8-use-pathlib
+    "TC",    # flake8-type-checking
+    "ANN",   # flake8-annotations
+    "ASYNC", # flake8-async
+    "S",     # flake8-bandit (security)
+    "A",     # flake8-builtins
+    "N",     # pep8-naming
+    "D",     # pydocstyle
+    "PERF",  # perflint
+    "FURB",  # refurb
+    "LOG",   # flake8-logging
+    "G",     # flake8-logging-format
+    "T20",   # no print() — keeps examples disciplined
+]
+ignore = [
+    "D203",    # 1 blank line before class (conflicts with D211)
+    "D213",    # multi-line summary second line (conflicts with D212)
+    "D107",    # missing docstring in __init__
+    "PLR0913", # too many arguments
+    "S101",    # assert used — fine in tests
+    "ANN401",  # Any in annotations — sometimes legitimate
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "D",       # docstrings not required in tests
+    "ANN",     # annotations not required in tests
+    "PLR2004", # magic values are fine in tests
+    "S",       # bandit rules relaxed in tests
+    "T20",     # print() ok in tests
+]
+"benchmarks/**" = ["D", "ANN", "PLR2004", "T20"]
+"examples/**" = ["D", "ANN", "T20", "PLR2004"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 88
+
+# ---------------------------------------------------------------------------
+# mypy — strict
+# ---------------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+enable_error_code = [
+    "redundant-expr",
+    "truthy-bool",
+    "ignore-without-code",
+    "unused-awaitable",
+    "possibly-undefined",
+]
+mypy_path = "src"
+namespace_packages = true
+explicit_package_bases = true
+files = ["src", "tests"]
+exclude = ["src/anymodbus/_version.py"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# ---------------------------------------------------------------------------
+# Pyright — secondary type checker
+# ---------------------------------------------------------------------------
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["src/anymodbus/_version.py", "**/__pycache__"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = "warning"
+reportUnknownMemberType = "warning"
+reportUnknownVariableType = "warning"
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-config",
+    "--strict-markers",
+    "--import-mode=importlib",
+    # Hardware tests are opt-in: every collection still walks them so
+    # broken syntax / imports surface, but they are deselected unless
+    # the caller passes `-m hardware`.
+    "-m",
+    "not hardware",
+]
+xfail_strict = true
+markers = [
+    "hardware: tests that require a real Modbus slave (opt-in; set ANYMODBUS_TEST_PORT and ANYMODBUS_TEST_SLAVE_ADDRESS)",
+    "slow: tests that are slow (>1s)",
+    "concurrency: stress tests for half-duplex bus locking",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:anyio.*",
+]
+
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+
+[tool.coverage.run]
+source_pkgs = ["anymodbus"]
+branch = true
+parallel = true
+omit = [
+    "src/anymodbus/_version.py",
+]
+
+[tool.coverage.paths]
+anymodbus = ["src/anymodbus", "*/anymodbus/src/anymodbus"]
+
+[tool.coverage.report]
+show_missing = true
+precision = 2
+skip_covered = false
+exclude_also = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "@overload",
+    "@abstractmethod",
+    "\\.\\.\\.",
+]
