@@ -594,13 +594,21 @@ class TestUnknownFcFallback:
         # Verify that _read_until_idle assembles bytes across multiple
         # receives that arrive within the gap window — i.e. the loop
         # continues past the first iteration before the gap fires.
+        #
+        # Timing values here are deliberately larger than the suite-wide
+        # _INTER_CHAR_GAP_S because Windows' default timer resolution is
+        # ~15.6ms — a sub-millisecond `anyio.sleep` actually runs at the
+        # next tick, which on Windows would exceed the 5ms gap and cause
+        # the framer to terminate between the two chunks. 200ms gap with
+        # a 50ms short delay leaves plenty of headroom on every platform.
+        gap = 0.2
+        short_delay = 0.05  # well under the gap, also well above any timer resolution
+        long_delay = 0.5  # well over the gap
         pdu = bytes([0x65, 0xAA, 0xBB, 0xCC, 0xDD])
         adu = _adu(0x01, pdu)
         head = adu[:2]
         payload_part1 = adu[2:5]
         payload_part2 = adu[5:]
-        short_delay = _INTER_CHAR_GAP_S / 5  # well under the gap
-        long_delay = _INTER_CHAR_GAP_S * 4  # well over the gap
         slave, returned_pdu = await read_response_adu(
             _stream(
                 head,
@@ -612,7 +620,7 @@ class TestUnknownFcFallback:
             ),
             expected_slave_address=0x01,
             expected_function_code=cast("FunctionCode", 0x65),
-            inter_char_timeout=_INTER_CHAR_GAP_S,
+            inter_char_timeout=gap,
         )
         assert slave == 0x01
         assert returned_pdu == pdu
