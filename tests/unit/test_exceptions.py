@@ -8,6 +8,7 @@ import pytest
 from anymodbus.exceptions import (
     AcknowledgeError,
     BusClosedError,
+    ChecksumError,
     ConfigurationError,
     ConnectionLostError,
     CRCError,
@@ -17,6 +18,7 @@ from anymodbus.exceptions import (
     IllegalDataAddressError,
     IllegalDataValueError,
     IllegalFunctionError,
+    LRCError,
     MemoryParityError,
     ModbusError,
     ModbusExceptionResponse,
@@ -41,6 +43,19 @@ class TestMultiInheritance:
     def test_crc_error_is_protocol_error(self) -> None:
         with pytest.raises(ProtocolError):
             raise CRCError("bad CRC")
+
+    def test_crc_and_lrc_are_checksum_errors(self) -> None:
+        # CRCError reparented under ChecksumError; both stay ProtocolErrors so
+        # existing ``except CRCError`` / ``except ProtocolError`` keep working.
+        assert issubclass(CRCError, ChecksumError)
+        assert issubclass(LRCError, ChecksumError)
+        assert issubclass(ChecksumError, ProtocolError)
+        with pytest.raises(ChecksumError):
+            raise CRCError("bad CRC")
+        with pytest.raises(ChecksumError):
+            raise LRCError("bad LRC")
+        with pytest.raises(ProtocolError):
+            raise LRCError("bad LRC")
 
     def test_frame_timeout_is_timeout_error(self) -> None:
         with pytest.raises(TimeoutError):

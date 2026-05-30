@@ -17,7 +17,11 @@ import pytest
 if TYPE_CHECKING:
     from _pytest.mark.structures import ParameterSet
 
-_UVLOOP_UNAVAILABLE = sys.platform == "win32" or importlib.util.find_spec("uvloop") is None
+# Order matters for pyright on Windows: it narrows ``sys.platform == "win32"``
+# to ``True`` and would mark the short-circuited ``find_spec`` branch (and its
+# import) unreachable. Evaluating ``find_spec`` first keeps the import "used" on
+# every platform; it is cheap and side-effect-free.
+_UVLOOP_UNAVAILABLE = importlib.util.find_spec("uvloop") is None or sys.platform == "win32"
 
 _PARAMS: list[ParameterSet] = [
     pytest.param(("asyncio", {"use_uvloop": False}), id="asyncio"),

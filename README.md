@@ -15,7 +15,7 @@ Async-native Modbus RTU client for Python, built on [AnyIO](https://anyio.readth
 
 ## Overview
 
-`anymodbus` is a small, opinionated Modbus RTU **client** built on AnyIO and `anyserial`. It is intentionally protocol-only and narrow in scope. It does not ship servers, ASCII transport, or device-specific drivers — `pymodbus` is the right choice if you need any of those, and the two libraries can coexist in one project.
+`anymodbus` is a small, opinionated Modbus **client** (RTU and ASCII serial framing) built on AnyIO and `anyserial`. It is intentionally protocol-only and narrow in scope. It does not ship servers, TCP transport (planned for v0.3), or device-specific drivers — `pymodbus` is the right choice if you need any of those, and the two libraries can coexist in one project.
 
 The cases `anymodbus` is built for:
 
@@ -106,6 +106,26 @@ port = await open_serial_port(
 )
 async with Bus(port) as bus:
     regs = await bus.slave(1).read_holding_registers(0, count=4)
+```
+
+### Modbus ASCII framing and a diagnostic loopback probe
+
+```python
+from anymodbus import Framing, RegisterSource, open_modbus_ascii
+
+# Classic 7E1 ASCII wire (data_bits=7); 8 also works.
+async with await open_modbus_ascii(
+    "/dev/ttyUSB0", baudrate=19_200, parity="even", data_bits=7
+) as bus:
+    slave = bus.slave(30)
+    # Cheap, side-effect-free liveness probe (FC08 sub-0 loopback):
+    assert await slave.diagnostic_loopback(b"\xAB\xCD") == b"\xAB\xCD"
+    # Read a measurement published as input registers (FC04):
+    o2 = await slave.read_float(0, source=RegisterSource.INPUT)
+
+# Caller-owned stream (e.g. a port shared across modes): pick framing explicitly.
+from anymodbus import Bus
+bus = Bus(my_byte_stream, framing=Framing.ASCII)
 ```
 
 ### Concurrent fan-out across multiple buses

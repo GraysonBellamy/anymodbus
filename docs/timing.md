@@ -77,3 +77,36 @@ cfg = BusConfig(timing=TimingConfig(inter_frame_idle=0.001, inter_char_idle=0.00
 ## RS-485 considerations
 
 When the kernel handles RTS-toggle (Linux RS-485 ioctl, modern USB-RS485 chips), the timing is hardware-tight and `anymodbus`'s defaults are correct. When userspace toggles RTS manually, the t3.5 gap also has to cover the bus turnaround. See [troubleshooting.md](troubleshooting.md) for the diagnosis flow if your reads time out on bus-idle hardware.
+
+## RS-485 cold-start & multidrop
+
+The **first** transaction after opening a port (or after a long idle) on a multidrop RS-485 bus often times out spuriously: the USB-RS485 adapter's direction-control line and the slave's receiver both need a beat to settle, and some adapters drop the leading bytes of the very first frame.
+
+`TimingConfig.startup_settle` (default 0) inserts a **one-shot** idle wait before the first transaction only — unlike `inter_frame_idle`, it isn't paid on every subsequent frame. Combined with the idempotent-read retry that already fires on a first-frame timeout, it absorbs adapter warm-up.
+
+Two recommended configs:
+
+```python
+from anymodbus import BusConfig, RetryPolicy, TimingConfig
+
+# (a) Fast, fail-fast probe — e.g. an AUTO/liveness sweep that must give up quickly:
+probe = BusConfig(
+    request_timeout=0.3,
+    retries=RetryPolicy(retries=1),
+    timing=TimingConfig(startup_settle=0.05),
+)
+
+# (b) Robust steady-state poll:
+poll = BusConfig(
+    retries=RetryPolicy(retries=2),
+    timing=TimingConfig(post_tx_settle=0.0005),  # bump for slow RS-485 transceivers
+)
+```
+
+### Shared-port caveat
+
+If your code **owns a serial port shared across protocols** (e.g. an `AUTO` mode that sniffs raw bytes before deciding which protocol is live) and parks bytes for another reader, set `reset_input_buffer_before_request=False`. The default `True` flushes the OS input buffer before each request — fine for a single reader, but it would discard bytes you intended for a different reader on a shared port.
+
+```python
+cfg = BusConfig(reset_input_buffer_before_request=False)
+```

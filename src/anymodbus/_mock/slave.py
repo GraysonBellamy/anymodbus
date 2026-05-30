@@ -23,8 +23,11 @@ import anyio
 import anyio.abc
 
 from anymodbus._mock.faults import FaultPlan
-from anymodbus._types import ExceptionCode, FunctionCode
+from anymodbus._types import ExceptionCode, Framing, FunctionCode
 from anymodbus.crc import crc16_modbus_bytes, verify_crc
+from anymodbus.exceptions import FrameError
+from anymodbus.framer_ascii import encode_ascii_adu, read_ascii_frame
+from anymodbus.lrc import lrc8_bytes, verify_lrc
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -57,6 +60,7 @@ _FIXED_REQUEST_TAIL: Final[Mapping[int, int]] = {
     FunctionCode.READ_INPUT_REGISTERS: 6,
     FunctionCode.WRITE_SINGLE_COIL: 6,  # addr(2) + value(2) + crc(2)
     FunctionCode.WRITE_SINGLE_REGISTER: 6,
+    FunctionCode.DIAGNOSTICS: 6,  # subfunction(2) + data(2) + crc(2) — sub-0 only
 }
 
 _VARIABLE_REQUEST_FCS: Final[frozenset[int]] = frozenset(
@@ -68,6 +72,10 @@ _CRC_LEN = 2
 # Length of the FC 0x0F / 0x10 request prefix on the wire (FC byte + address(2) +
 # count(2) + byte_count(1)). The variable-length data payload follows.
 _WRITE_MULTIPLE_REQUEST_PREFIX_LEN = 6
+
+# FC 0x08 Diagnostics: only sub-function 0x0000 (Return Query Data) is modelled.
+_DIAG_SUBFN_RETURN_QUERY_DATA = 0x0000
+_DIAG_REQUEST_PDU_LEN = 5  # fc(1) + subfn(2) + data(2)
 
 
 class _ServerException(Exception):  # noqa: N818 — internal sentinel, not user-visible
@@ -97,6 +105,7 @@ class MockSlave:
     input_registers: list[int]
     faults: FaultPlan
     disabled_function_codes: frozenset[int]
+    framing: Framing
 
     def __init__(
         self,
@@ -108,6 +117,7 @@ class MockSlave:
         input_register_count: int | None = None,
         faults: FaultPlan | None = None,
         disabled_function_codes: frozenset[int] | None = None,
+        framing: Framing = Framing.RTU,
     ) -> None:
         """Construct a mock slave.
 
@@ -128,6 +138,9 @@ class MockSlave:
                 :attr:`ExceptionCode.ILLEGAL_FUNCTION` even though the mock
                 otherwise implements them. Used by capability-probe tests to
                 simulate a slave that lacks specific function codes.
+            framing: Wire framing the slave reads and emits — :attr:`Framing.RTU`
+                (binary + CRC) or :attr:`Framing.ASCII` (``:``..LRC..CRLF). The
+                same register banks back either framing.
         """
         if not (_MIN_SLAVE_ADDRESS <= address <= _MAX_SLAVE_ADDRESS):
             msg = (
@@ -148,6 +161,7 @@ class MockSlave:
         self.disabled_function_codes = (
             disabled_function_codes if disabled_function_codes is not None else frozenset()
         )
+        self.framing = framing
         self._coil_count = coil_count
         self._discrete_input_count = discrete_input_count
         self._register_count = register_count
@@ -160,19 +174,21 @@ class MockSlave:
         """Accept requests on ``stream``, write responses, until cancelled.
 
         Loops forever (or until the stream closes / the task is cancelled)
-        reading one request per iteration. Bad CRCs are logged and dropped
-        — there is no in-band recovery mechanism on a real Modbus bus, so
-        the mock mirrors that behaviour.
+        reading one request per iteration. Bad checksums (CRC for RTU, LRC for
+        ASCII) are logged and dropped — there is no in-band recovery mechanism
+        on a real Modbus bus, so the mock mirrors that behaviour. The framing
+        (:attr:`framing`) selects the RTU or ASCII wire reader.
         """
+        serve_one = self._serve_one_ascii if self.framing is Framing.ASCII else self._serve_one_rtu
         while True:
             try:
-                continue_loop = await self._serve_one(stream)
+                continue_loop = await serve_one(stream)
             except (anyio.EndOfStream, anyio.ClosedResourceError):
                 return
             if not continue_loop:
                 return
 
-    async def _serve_one(self, stream: anyio.abc.ByteStream) -> bool:
+    async def _serve_one_rtu(self, stream: anyio.abc.ByteStream) -> bool:
         head = await self._read_exact(stream, 2)
         addr = head[0]
         fc = head[1]
@@ -197,33 +213,64 @@ class MockSlave:
             _LOGGER.warning("MockSlave: CRC mismatch on request, dropping")
             return True
 
-        if addr not in (self.address, _BROADCAST_ADDRESS):
+        request_pdu = full_request[1:-_CRC_LEN]  # strip slave addr + CRC
+        response_pdu = self._dispatch(addr, request_pdu)
+        if response_pdu is not None:
+            await self._send_response_rtu(stream, response_pdu)
+        return True
+
+    async def _serve_one_ascii(self, stream: anyio.abc.ByteStream) -> bool:
+        try:
+            raw = await read_ascii_frame(stream)
+        except FrameError:
+            # Malformed frame we can't even de-hex. A clean close between frames
+            # surfaces as EndOfStream (handled in serve()), not FrameError, so
+            # this branch is genuinely a corrupt request: drop and keep serving.
+            _LOGGER.warning("MockSlave: malformed ASCII request frame, dropping")
+            return True
+        if not verify_lrc(raw):
+            # Mirror the RTU bad-CRC drop (decision D2) — caller branches on the
+            # bool, no exception to crash the serve task.
+            _LOGGER.warning("MockSlave: LRC mismatch on request, dropping")
             return True
 
-        request_pdu = full_request[1:-_CRC_LEN]  # strip slave addr + CRC
-        is_broadcast = addr == _BROADCAST_ADDRESS
+        addr, request_pdu = raw[0], raw[1:-1]  # strip slave addr + LRC
+        response_pdu = self._dispatch(addr, request_pdu)
+        if response_pdu is not None:
+            await self._send_response_ascii(stream, response_pdu)
+        return True
 
+    def _dispatch(self, addr: int, request_pdu: bytes) -> bytes | None:
+        """Shared request handling for both framings.
+
+        Returns the response PDU to emit, or ``None`` when nothing should be
+        sent (request for another slave, or a broadcast — *serial §2.1*).
+        """
+        if addr not in (self.address, _BROADCAST_ADDRESS):
+            return None
         try:
             response_pdu = self._handle_request(request_pdu)
         except _ServerException as exc:
-            response_pdu = bytes((fc | 0x80, int(exc.code)))
+            response_pdu = bytes((request_pdu[0] | 0x80, int(exc.code)))
+        if addr == _BROADCAST_ADDRESS:
+            return None
+        return response_pdu
 
-        if is_broadcast:
-            # *serial §2.1*: broadcasts elicit no response.
-            return True
-
-        await self._send_response(stream, response_pdu)
-        return True
-
-    async def _send_response(self, stream: anyio.abc.ByteStream, response_pdu: bytes) -> None:
-        plan = self.faults
+    def _should_drop_or_delay(self) -> tuple[bool, int]:
+        """Advance the response counter; return ``(dropped, idx)`` for this response."""
         idx = self._responses_emitted
         self._responses_emitted += 1
-
+        plan = self.faults
         if plan.drop_response_after_n is not None and idx == plan.drop_response_after_n:
             _LOGGER.info("MockSlave: dropping response %d per FaultPlan", idx)
-            return
+            return True, idx
+        return False, idx
 
+    async def _send_response_rtu(self, stream: anyio.abc.ByteStream, response_pdu: bytes) -> None:
+        dropped, idx = self._should_drop_or_delay()
+        if dropped:
+            return
+        plan = self.faults
         if plan.delay_response_seconds > 0:
             await anyio.sleep(plan.delay_response_seconds)
 
@@ -238,6 +285,29 @@ class MockSlave:
             crc = bytes((crc[0] ^ 0x01, crc[1]))
 
         await stream.send(head + crc)
+
+    async def _send_response_ascii(self, stream: anyio.abc.ByteStream, response_pdu: bytes) -> None:
+        dropped, idx = self._should_drop_or_delay()
+        if dropped:
+            return
+        plan = self.faults
+        if plan.delay_response_seconds > 0:
+            await anyio.sleep(plan.delay_response_seconds)
+
+        slave_byte = (
+            plan.wrong_slave_address if plan.wrong_slave_address is not None else self.address
+        )
+        if plan.corrupt_crc_after_n is not None and idx == plan.corrupt_crc_after_n:
+            # Same fault, framing-aware: corrupt the LRC by flipping a bit of
+            # the binary frame before hex-encoding, so the client sees LRCError.
+            _LOGGER.info("MockSlave: corrupting LRC on response %d per FaultPlan", idx)
+            body = bytes((slave_byte,)) + response_pdu
+            frame = bytearray(body + lrc8_bytes(body))
+            frame[-1] ^= 0x01
+            await stream.send(b":" + frame.hex().upper().encode("ascii") + b"\r\n")
+            return
+
+        await stream.send(encode_ascii_adu(slave_address=slave_byte, pdu=response_pdu))
 
     # ------------------------------------------------------------------
     # Per-FC handlers. Each takes the request PDU (FC byte + body) and
@@ -265,7 +335,19 @@ class MockSlave:
             return self._handle_write_multiple_coils(pdu)
         if fc == FunctionCode.WRITE_MULTIPLE_REGISTERS:
             return self._handle_write_multiple_registers(pdu)
+        if fc == FunctionCode.DIAGNOSTICS:
+            return self._handle_diagnostic_loopback(pdu)
         raise _ServerException(ExceptionCode.ILLEGAL_FUNCTION)
+
+    def _handle_diagnostic_loopback(self, pdu: bytes) -> bytes:
+        # FC 0x08 sub 0x0000 (Return Query Data): echo fc + subfn + data word.
+        if len(pdu) != _DIAG_REQUEST_PDU_LEN:
+            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
+        (subfn,) = struct.unpack(">H", pdu[1:3])
+        if subfn != _DIAG_SUBFN_RETURN_QUERY_DATA:
+            # We model sub-0 only; reject other sub-functions as the spec allows.
+            raise _ServerException(ExceptionCode.ILLEGAL_FUNCTION)
+        return pdu
 
     def _handle_read_bits(self, pdu: bytes, bank: bytearray, bank_size: int) -> bytes:
         fc, addr, count = struct.unpack(">BHH", pdu)

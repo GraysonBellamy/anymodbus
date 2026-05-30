@@ -36,11 +36,12 @@ The niche it fills: nothing in the ecosystem today is AnyIO-native, half-duplex-
 ### Non-goals (v1.x)
 
 - Modbus servers (slave-side). Out of scope.
-- Modbus ASCII transport.
-- Modbus TCP / RTU-over-TCP. (Architectural seam preserved — re-add later as `anymodbus.tcp` without breaking the `Bus` API.)
+- Modbus TCP / RTU-over-TCP. (Architectural seam preserved — the `Framer` strategy realized in v0.2 lets the MBAP framer slot in as `anymodbus.framer_tcp` without breaking the `Bus` API.)
 - File-record FCs (0x14/0x15) — defer to v0.3+ unless a user asks.
-- Serial-line-only diagnostic FCs: 0x07 Read Exception Status, 0x08 Diagnostics, 0x0B Get Comm Event Counter, 0x0C Get Comm Event Log, 0x11 Report Server ID, 0x18 Read FIFO Queue. Out of scope for v0.1; add per user demand. The framer recognizes them as known-but-unsupported and raises `ModbusUnsupportedFunctionError` rather than mis-framing on the wire. Special case to keep on the radar when these are added: FC 0x08 sub-function 0x04 (Force Listen Only Mode) returns no response — must be handled like a broadcast.
-- Encapsulated Interface Transport (FC 0x2B). MEI Type 0x0E (Read Device Identification) is planned for v0.2; MEI Type 0x0D (CANopen General Reference) is out of scope.
+- Serial-line diagnostic FCs **other than** FC 0x08 sub-function 0x0000: 0x07 Read Exception Status, 0x0B Get Comm Event Counter, 0x0C Get Comm Event Log, 0x11 Report Server ID, 0x18 Read FIFO Queue. The framer recognizes them as known-but-unsupported and raises `ModbusUnsupportedFunctionError` rather than mis-framing on the wire. FC 0x08 itself is now **partially supported** (sub-0 loopback only, since v0.2). Footgun to keep on the radar if FC08 is widened: sub-function 0x04 (Force Listen Only Mode) returns no response — must be handled like a broadcast — and other sub-functions are variable-length, so the framer's fixed 6-byte FC08 tail is only safe while sub-0 is the sole sub-function the client can emit.
+- Encapsulated Interface Transport (FC 0x2B), including MEI Type 0x0E (Read Device Identification) and MEI Type 0x0D (CANopen General Reference). Out of scope.
+
+Capabilities **added in v0.2** (formerly non-goals): Modbus ASCII serial framing, and FC 0x08 sub-0 diagnostic loopback.
 - Built-in device drivers beyond a tiny `examples/` directory. Vendor-specific register maps and quirks live in their own downstream packages.
 
 ## 3. Architecture overview
@@ -245,7 +246,8 @@ _BYTE_COUNT_1B: Final[frozenset[int]] = frozenset({0x01, 0x02, 0x03, 0x04, 0x17}
 # the framer can fail with a precise error rather than mis-frame.
 _KNOWN_UNSUPPORTED: Final[frozenset[int]] = frozenset({
     0x07,  # Read Exception Status (serial line only)
-    0x08,  # Diagnostics
+    # 0x08 Diagnostics is NOT here since v0.2: sub-0 loopback is supported via
+    # a fixed 6-byte tail in _FIXED_TAIL.
     0x0B,  # Get Comm Event Counter
     0x0C,  # Get Comm Event Log
     0x11,  # Report Server ID
@@ -394,7 +396,9 @@ Mirrors anyserial's multi-inheritance idiom. All inherit `ModbusError` plus a st
 | `ModbusError` | `Exception` | Base |
 | `ConfigurationError` | `ModbusError, ValueError` | Bad value passed to a config dataclass or constructor |
 | `ProtocolError` | `ModbusError, ValueError` | Codec/framer rejected something well-formed |
-| `CRCError` | `ProtocolError` | CRC mismatch |
+| `ChecksumError` | `ProtocolError` | Frame complete but its trailing checksum failed (base of `CRCError`/`LRCError`) |
+| `CRCError` | `ChecksumError` | RTU CRC-16 mismatch |
+| `LRCError` | `ChecksumError` | ASCII LRC mismatch |
 | `FrameError` | `ProtocolError` | Truncated, junk between frames |
 | `FrameTimeoutError` | `ModbusError, TimeoutError` | No response within deadline |
 | `ConnectionLostError` | `ModbusError, anyio.BrokenResourceError` | Stream disconnected mid-txn |
@@ -757,8 +761,21 @@ the bus is dead — open a new one. There is no auto-reconnect in v0.1
 
 ### v0.2 — Hardening & extras
 
+**Shipped in v0.2:**
+
+- **Modbus ASCII serial framing** (`Framing.ASCII`, `open_modbus_ascii`, pure
+  `anymodbus.lrc`). Realized via a narrow `Framer` strategy seam (`RtuFramer` /
+  `AsciiFramer` + a shared `interpret_response_pdu`) — the same seam the v0.3
+  TCP/MBAP framer will slot into.
+- **FC 0x08 sub-0 diagnostic loopback** (`Slave.diagnostic_loopback`).
+- **FC04 input registers** in the typed reads (`source=RegisterSource.INPUT`).
+- **`TimingConfig.startup_settle`** one-shot RS485 cold-start settle.
+- **`MockSlave`** ASCII + FC08 parity.
 - FC 0x16 (Mask Write), 0x17 (Read/Write Multiple).
 - `Slave.probe()` capability detection.
+
+**Deferred past v0.2:**
+
 - FC 0x2B / MEI 0x0E (Read Device Identification). Per *app §6.21*, multi-object responses use a `More Follows` / `NextObjectId` continuation loop — a single user call may issue 1..N transactions on the bus. Wrapper API:
     ```python
     await slave.read_device_identification(
@@ -773,9 +790,7 @@ the bus is dead — open a new one. There is no auto-reconnect in v0.1
 ### v0.3 — Modbus TCP
 
 - `anymodbus.tcp` adds `open_modbus_tcp(host, port)` returning a `Bus` over an `anyio.connect_tcp` stream.
-- MBAP framer (different framing — adds transaction ID, no CRC). Cleanly slot in as an alternative `Framer` strategy without disturbing the `Bus` API.
-
-### v0.4 — Modbus ASCII (optional, only if a user asks)
+- MBAP framer (different framing — adds transaction ID, no CRC). Slots in as an alternative `Framer` strategy (`framer_tcp.py` + one line in `get_framer`, reusing `interpret_response_pdu`) without disturbing the `Bus` API — the seam was realized in v0.2.
 
 ### v1.0 — API freeze
 

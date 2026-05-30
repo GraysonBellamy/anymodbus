@@ -31,6 +31,14 @@ class TestFunctionPredicates:
         assert not is_write_function(FunctionCode.READ_WRITE_MULTIPLE_REGISTERS)
         assert not is_idempotent_function(FunctionCode.READ_WRITE_MULTIPLE_REGISTERS)
 
+    def test_diagnostics_is_idempotent_but_not_read_or_write(self) -> None:
+        # FC 0x08 sub-0 loopback is side-effect-free, so it is idempotent
+        # (safe to re-fire), but it is not a register read/write FC.
+        assert int(FunctionCode.DIAGNOSTICS) == 0x08
+        assert is_idempotent_function(FunctionCode.DIAGNOSTICS)
+        assert not is_read_function(FunctionCode.DIAGNOSTICS)
+        assert not is_write_function(FunctionCode.DIAGNOSTICS)
+
     def test_unknown_codes_are_not_anything(self) -> None:
         assert not is_read_function(0xFE)
         assert not is_write_function(0xFE)

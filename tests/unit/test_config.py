@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from anymodbus import BusConfig, RetryPolicy, TimingConfig
-from anymodbus.exceptions import ConfigurationError, CRCError, FrameTimeoutError
+from anymodbus.exceptions import (
+    ChecksumError,
+    ConfigurationError,
+    CRCError,
+    FrameTimeoutError,
+    LRCError,
+)
 
 
 class TestBusConfig:
@@ -50,7 +56,11 @@ class TestRetryPolicy:
         assert rp.retries == 1
         assert rp.retry_idempotent_only is True
         assert rp.backoff_base == 0.0
-        assert rp.retry_on == frozenset({CRCError, FrameTimeoutError})
+        # Default widened to ChecksumError so both RTU CRC and ASCII LRC retry.
+        assert rp.retry_on == frozenset({ChecksumError, FrameTimeoutError})
+        # CRCError and LRCError are subclasses, so they're retried via isinstance.
+        assert issubclass(CRCError, ChecksumError)
+        assert issubclass(LRCError, ChecksumError)
 
     def test_retries_negative_rejected(self) -> None:
         with pytest.raises(ConfigurationError):
@@ -77,6 +87,14 @@ class TestTimingConfig:
         assert tc.inter_char_idle == "auto"
         assert tc.post_tx_settle == 0.0
         assert tc.broadcast_turnaround == 0.1
+        assert tc.startup_settle == 0.0
+
+    def test_negative_startup_settle_rejected(self) -> None:
+        with pytest.raises(ConfigurationError):
+            TimingConfig(startup_settle=-0.001)
+
+    def test_startup_settle_accepted(self) -> None:
+        assert TimingConfig(startup_settle=0.05).startup_settle == 0.05
 
     def test_explicit_numeric_accepted(self) -> None:
         tc = TimingConfig(inter_frame_idle=0.005, inter_char_idle=0.002)

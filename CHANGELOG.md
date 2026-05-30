@@ -7,6 +7,56 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-30
+
+Adds Modbus-ASCII framing, FC08 diagnostic loopback, FC04 input-register typed
+reads, and RS485 cold-start ergonomics — the capabilities requested by
+`servomexlib` for its `[modbus-ascii]` / `AUTO` milestone. The public API is
+additive and backwards-compatible; the internal framing layer was restructured
+behind a narrow `Framer` strategy seam so RTU / ASCII / (future) TCP share one
+response interpreter.
+
+### Added
+
+- **Modbus-ASCII framing.** `Bus(stream, framing=Framing.ASCII)` selects the
+  `:`…hex…LRC…CRLF wire format, sharing the existing PDU/register codec
+  unchanged. New `Framing` enum (`RTU` / `ASCII`) and a thin
+  `open_modbus_ascii(path, *, baudrate, parity, data_bits=8)` convenience opener
+  (`data_bits=7` for the classic 7E1 wire). Sync mirrors included.
+- **Pure LRC primitives** at `anymodbus.lrc`: `lrc8`, `lrc8_bytes`, `verify_lrc`
+  — mirroring `anymodbus.crc` (submodule-level, not top-level).
+- **FC08 diagnostic loopback.** `Slave.diagnostic_loopback(data=b"\x00\x00")`
+  (FC 0x08 sub-function 0x0000, Return Query Data) — a side-effect-free
+  liveness / round-trip probe. PDU codec in `anymodbus.pdu`; sync mirror.
+- **FC04 input registers in the typed reads.** `Slave.read_float` /
+  `read_int32` / `read_string` (and sync mirrors) accept
+  `source=RegisterSource.INPUT` (FC04) — defaults to `HOLDING` (FC03).
+- **`TimingConfig.startup_settle`** — a one-shot idle wait applied once before
+  the first transaction, to absorb USB-RS485 adapter warm-up.
+- **`ChecksumError`** base exception (parent of `CRCError` and the new
+  `LRCError`).
+- **`MockSlave` parity:** answers FC08 sub-0 (echo) and can speak ASCII
+  (`MockSlave(framing=...)`, `client_slave_pair(framing=...)`), so one register
+  bank backs both an RTU and an ASCII bus in hardware-free CI.
+
+### Changed
+
+- Default `RetryPolicy.retry_on` widened from `{CRCError, FrameTimeoutError}` to
+  `{ChecksumError, FrameTimeoutError}`, so ASCII `LRCError` retries by default.
+  RTU behaviour is unchanged (`CRCError ⊂ ChecksumError`; retry uses
+  `isinstance`). Note: a direct membership check `CRCError in
+  cfg.retries.retry_on` is now `False` by default even though `CRCError` is
+  still retried — only the set membership changed, not the behaviour.
+- FC 0x08 reclassified from "known-unsupported" (raised
+  `ModbusUnsupportedFunctionError`) to supported (sub-0 only). `CRCError`
+  reparented from `ProtocolError` to `ChecksumError` (still a `ProtocolError`
+  transitively — `except CRCError` / `except ProtocolError` unaffected).
+- Internal: the RTU framer was split into `RtuFramer.read_adu` (reads one raw
+  frame) plus a shared `interpret_response_pdu`; the module-level
+  `read_response_adu` is preserved as a compatibility wrapper.
+
+No breaking changes to documented public API.
+
 ## [0.1.1] - 2026-04-26
 
 First post-release polish, driven by the REVIEW.md notes against v0.1.0
