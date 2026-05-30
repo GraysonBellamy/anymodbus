@@ -8,7 +8,9 @@
 ModbusError                          (Exception)
 ├── ConfigurationError               (ValueError)        ← raised at construction time
 ├── ProtocolError                    (ValueError)        ← raised on the wire
-│   ├── CRCError
+│   ├── ChecksumError
+│   │   ├── CRCError                                     ← RTU CRC-16 mismatch
+│   │   └── LRCError                                     ← ASCII LRC mismatch
 │   ├── FrameError
 │   └── UnexpectedResponseError
 ├── FrameTimeoutError                (TimeoutError)
@@ -37,7 +39,8 @@ ModbusError                          (Exception)
 | `BusConfig(request_timeout=-1)` | `ConfigurationError` |
 | `Slave(bus, address=999)` | `ConfigurationError` |
 | `slave.read_holding_registers(...)` on a broadcast handle (address 0) | `ConfigurationError` |
-| CRC mismatch on response | `CRCError` |
+| CRC mismatch on response (RTU) | `CRCError` (a `ChecksumError`) |
+| LRC mismatch on response (ASCII) | `LRCError` (a `ChecksumError`) |
 | No response within `request_timeout` | `FrameTimeoutError` |
 | Slave returned exception code | `ModbusExceptionResponse` subclass |
 | USB cable yanked mid-transaction | `ConnectionLostError` |

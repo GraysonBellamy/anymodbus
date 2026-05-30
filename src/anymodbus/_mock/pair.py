@@ -16,6 +16,7 @@ from anyserial import SerialConfig
 from anyserial.testing import serial_port_pair
 
 from anymodbus._mock.slave import MockSlave
+from anymodbus._types import Framing
 from anymodbus.bus import Bus
 
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ async def client_slave_pair(
     disabled_function_codes: frozenset[int] | None = None,
     bus_config: BusConfig | None = None,
     baudrate: int = _DEFAULT_TEST_BAUD,
+    framing: Framing = Framing.RTU,
 ) -> AsyncGenerator[tuple[Bus, MockSlave]]:
     """Yield ``(bus, mock_slave)`` connected over an in-process serial pair.
 
@@ -66,6 +68,8 @@ async def client_slave_pair(
         bus_config: Optional :class:`BusConfig` for the bus side.
         baudrate: Serial baudrate applied to both ends. Affects auto-resolved
             inter-frame timing.
+        framing: Wire framing for *both* ends — :attr:`Framing.RTU` (default)
+            or :attr:`Framing.ASCII`. One register bank backs either framing.
 
     Yields:
         ``(bus, mock_slave)``. The bus is fully wired and ready for I/O; the
@@ -73,7 +77,7 @@ async def client_slave_pair(
     """
     cfg = SerialConfig(baudrate=baudrate)
     client_end, slave_end = serial_port_pair(config_a=cfg, config_b=cfg)
-    bus = Bus(client_end, config=bus_config)
+    bus = Bus(client_end, config=bus_config, framing=framing)
     slave = MockSlave(
         address=slave_address,
         register_count=register_count,
@@ -82,6 +86,7 @@ async def client_slave_pair(
         input_register_count=input_register_count,
         faults=faults,
         disabled_function_codes=disabled_function_codes,
+        framing=framing,
     )
     try:
         async with anyio.create_task_group() as tg:

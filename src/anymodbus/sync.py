@@ -32,13 +32,14 @@ from anyserial.sync import (
 )
 from anyserial.sync import configure_portal
 
+from anymodbus.stream import open_modbus_ascii as _async_open_modbus_ascii
 from anymodbus.stream import open_modbus_rtu as _async_open_modbus_rtu
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from types import TracebackType
 
-    from anymodbus._types import ByteOrder, WordOrder
+    from anymodbus._types import ByteOrder, RegisterSource, WordOrder
     from anymodbus.bus import Bus as _AsyncBus
     from anymodbus.config import BusConfig
     from anymodbus.slave import Slave as _AsyncSlave
@@ -349,17 +350,21 @@ class Slave:
         *,
         word_order: WordOrder | None = None,
         byte_order: ByteOrder | None = None,
+        source: RegisterSource | None = None,
         timeout: float | None = None,
     ) -> float:
         """Sync read_float.
 
         ``None`` for ordering keeps the async defaults (``HIGH_LOW`` / ``BIG``).
+        ``source`` selects the holding (default) or input register bank.
         """
         kwargs: dict[str, Any] = {}
         if word_order is not None:
             kwargs["word_order"] = word_order
         if byte_order is not None:
             kwargs["byte_order"] = byte_order
+        if source is not None:
+            kwargs["source"] = source
 
         async def _call() -> float:
             return await self._async_slave.read_float(address, **kwargs)
@@ -394,14 +399,17 @@ class Slave:
         signed: bool = True,
         word_order: WordOrder | None = None,
         byte_order: ByteOrder | None = None,
+        source: RegisterSource | None = None,
         timeout: float | None = None,
     ) -> int:
-        """Sync read_int32."""
+        """Sync read_int32. ``source`` selects holding (default) or input registers."""
         kwargs: dict[str, Any] = {"signed": signed}
         if word_order is not None:
             kwargs["word_order"] = word_order
         if byte_order is not None:
             kwargs["byte_order"] = byte_order
+        if source is not None:
+            kwargs["source"] = source
 
         async def _call() -> int:
             return await self._async_slave.read_int32(address, **kwargs)
@@ -439,9 +447,13 @@ class Slave:
         byte_order: ByteOrder | None = None,
         encoding: str = "ascii",
         strip_null: bool = True,
+        source: RegisterSource | None = None,
         timeout: float | None = None,
     ) -> str:
-        """Sync read_string. Supply ``register_count`` *or* ``byte_count``."""
+        """Sync read_string. Supply ``register_count`` *or* ``byte_count``.
+
+        ``source`` selects holding (default) or input registers.
+        """
         kwargs: dict[str, Any] = {
             "encoding": encoding,
             "strip_null": strip_null,
@@ -452,6 +464,8 @@ class Slave:
             kwargs["byte_count"] = byte_count
         if byte_order is not None:
             kwargs["byte_order"] = byte_order
+        if source is not None:
+            kwargs["source"] = source
 
         async def _call() -> str:
             return await self._async_slave.read_string(address, **kwargs)
@@ -487,6 +501,20 @@ class Slave:
 
         _call_with_timeout(self._portal, _call, timeout)
 
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+
+    def diagnostic_loopback(
+        self, data: bytes = b"\x00\x00", *, timeout: float | None = None
+    ) -> bytes:
+        """Sync FC 0x08 sub 0x0000 — echo ``data`` (exactly 2 bytes) off the slave."""
+
+        async def _call() -> bytes:
+            return await self._async_slave.diagnostic_loopback(data)
+
+        return _call_with_timeout(self._portal, _call, timeout)
+
 
 def open_modbus_rtu(
     path: str,
@@ -518,4 +546,35 @@ def open_modbus_rtu(
     return Bus(async_bus, portal=portal, provider=provider)
 
 
-__all__ = ["Bus", "Slave", "configure_portal", "open_modbus_rtu"]
+def open_modbus_ascii(
+    path: str,
+    *,
+    baudrate: int,
+    parity: ParityLiteral,
+    data_bits: int = 8,
+    config: BusConfig | None = None,
+    timeout: float | None = None,
+) -> Bus:
+    """Open a serial port and return a blocking Modbus-**ASCII** :class:`Bus`.
+
+    Counterpart to :func:`anymodbus.open_modbus_ascii`. See that function for
+    parameter documentation (including ``data_bits`` for the classic 7E1 wire).
+    ``timeout`` bounds the open operation itself.
+    """
+    provider = _anyserial_get_provider()
+    portal = provider.__enter__()
+    try:
+
+        async def _open() -> _AsyncBus:
+            return await _async_open_modbus_ascii(
+                path, baudrate=baudrate, parity=parity, data_bits=data_bits, config=config
+            )
+
+        async_bus = _call_with_timeout(portal, _open, timeout)
+    except BaseException:
+        provider.__exit__(None, None, None)
+        raise
+    return Bus(async_bus, portal=portal, provider=provider)
+
+
+__all__ = ["Bus", "Slave", "configure_portal", "open_modbus_ascii", "open_modbus_rtu"]

@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Self
 
 from anymodbus.exceptions import (
+    ChecksumError,
     ConfigurationError,
-    CRCError,
     FrameTimeoutError,
     ModbusError,
 )
@@ -48,12 +48,18 @@ class TimingConfig:
             before the next transaction is allowed. The Serial Line spec
             §2.4.1 calls for a "Turnaround delay" long enough for every slave
             to finish processing — typically 100-200 ms. Default 100 ms.
+        startup_settle: One-shot idle wait applied **once**, before the very
+            first transaction on the bus. Absorbs USB-RS485 adapter / receiver
+            warm-up so the first frame isn't dropped on a freshly-opened link.
+            Unlike ``inter_frame_idle`` (applied before every frame), this is
+            applied exactly once. Default 0 (disabled).
     """
 
     inter_frame_idle: float | AutoTiming = "auto"
     inter_char_idle: float | AutoTiming = "auto"
     post_tx_settle: float = 0.0
     broadcast_turnaround: float = _DEFAULT_BROADCAST_TURNAROUND
+    startup_settle: float = 0.0
 
     def __post_init__(self) -> None:
         """Validate numeric timings."""
@@ -69,9 +75,14 @@ class TimingConfig:
             raise ConfigurationError(
                 f"broadcast_turnaround must be >= 0 (got {self.broadcast_turnaround!r})"
             )
+        if self.startup_settle < 0:
+            raise ConfigurationError(f"startup_settle must be >= 0 (got {self.startup_settle!r})")
 
 
-_DEFAULT_RETRY_ON: frozenset[type[ModbusError]] = frozenset({CRCError, FrameTimeoutError})
+# ``ChecksumError`` (not ``CRCError``) so both RTU CRC-16 and ASCII LRC
+# failures retry by default. ``CRCError`` ⊂ ``ChecksumError``, so RTU behaviour
+# is unchanged; the ``_should_retry`` path uses ``isinstance``, not membership.
+_DEFAULT_RETRY_ON: frozenset[type[ModbusError]] = frozenset({ChecksumError, FrameTimeoutError})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -83,7 +94,8 @@ class RetryPolicy:
             Must be >= 0; no upper cap (the caller knows their tolerance for
             blocking better than we do).
         retry_on: Exception classes that count as "transient" and trigger a
-            retry. Default ``{CRCError, FrameTimeoutError}``. Modbus exception
+            retry. Default ``{ChecksumError, FrameTimeoutError}`` — ``ChecksumError``
+            covers both RTU ``CRCError`` and ASCII ``LRCError``. Modbus exception
             responses (``IllegalFunctionError`` etc.) are NEVER retried — the
             slave told us no, retrying won't change that.
         retry_idempotent_only: If True (default), only read function codes

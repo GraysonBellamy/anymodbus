@@ -409,7 +409,6 @@ class TestKnownUnsupportedFunctionCodes:
         "fc",
         [
             0x07,  # Read Exception Status
-            0x08,  # Diagnostics
             0x0B,  # Get Comm Event Counter
             0x0C,  # Get Comm Event Log
             0x11,  # Report Server ID
@@ -439,12 +438,13 @@ class TestKnownUnsupportedFunctionCodes:
                 inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
-    async def test_unsupported_fc_returned_when_supported_expected(self) -> None:
-        # Realistic-but-rare bug case: we sent FC 3, slave returns FC 0x08
-        # (Diagnostics) by mistake. The fc-mismatch check fires first, so the
-        # caller sees UnexpectedResponseError, not ModbusUnsupportedFunctionError
-        # — the framer doesn't have to reason about what the slave "meant".
-        forged = bytes([0x01, 0x08])
+    async def test_supported_but_mismatched_fc_raises_unexpected(self) -> None:
+        # Realistic-but-rare bug case: we sent FC 3, slave returns a complete,
+        # valid FC 0x08 (Diagnostics sub-0) frame by mistake. FC08 is now
+        # framable (fixed 6-byte tail), so the framer reads the whole frame and
+        # the shared interpreter (D1) raises UnexpectedResponseError on the
+        # fc mismatch (0x08 != 0x03) — not ModbusUnsupportedFunctionError.
+        forged = _adu(0x01, bytes([0x08, 0x00, 0x00, 0xAB, 0xCD]))
         with pytest.raises(UnexpectedResponseError, match="fc 0x08"):
             await read_response_adu(
                 _stream(forged),

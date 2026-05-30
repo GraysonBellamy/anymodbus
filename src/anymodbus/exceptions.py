@@ -51,8 +51,22 @@ class ProtocolError(ModbusError, ValueError):
     """
 
 
-class CRCError(ProtocolError):
-    """Received frame's CRC did not match the computed CRC."""
+class ChecksumError(ProtocolError):
+    """A frame was complete but its trailing checksum did not verify.
+
+    Base class for the framing-specific checksum failures: :class:`CRCError`
+    (RTU CRC-16) and :class:`LRCError` (ASCII LRC). Catch this to treat both
+    framings' checksum failures uniformly; it remains a :class:`ProtocolError`,
+    so existing ``except ProtocolError`` blocks are unaffected.
+    """
+
+
+class CRCError(ChecksumError):
+    """Received RTU frame's CRC-16 did not match the computed CRC."""
+
+
+class LRCError(ChecksumError):
+    """Received ASCII frame's LRC did not match the computed LRC."""
 
 
 class FrameError(ProtocolError):
@@ -73,7 +87,7 @@ class ModbusUnsupportedFunctionError(ModbusError, NotImplementedError):
     Distinct from :class:`IllegalFunctionError` (which the slave raises) — this
     is raised locally by the framer or PDU codec when the caller asks for an
     FC that ``anymodbus`` recognises but has not implemented (e.g., the
-    serial-line diagnostic FCs 0x07/0x08/0x0B/0x0C/0x11/0x18 in v0.1). Inherits
+    serial-line diagnostic FCs 0x07/0x0B/0x0C/0x11/0x18). Inherits
     :class:`NotImplementedError` so generic ``except NotImplementedError``
     handlers still catch it.
     """
@@ -275,6 +289,7 @@ __all__ = [
     "AcknowledgeError",
     "BusClosedError",
     "CRCError",
+    "ChecksumError",
     "ConfigurationError",
     "ConnectionLostError",
     "FrameError",
@@ -284,6 +299,7 @@ __all__ = [
     "IllegalDataAddressError",
     "IllegalDataValueError",
     "IllegalFunctionError",
+    "LRCError",
     "MemoryParityError",
     "ModbusError",
     "ModbusExceptionResponse",
