@@ -7,6 +7,8 @@ over ASCII, and the ASCII checksum-corruption fault path.
 
 from __future__ import annotations
 
+import math
+
 import anyio
 import pytest
 
@@ -107,7 +109,8 @@ async def test_read_float_input_source(framing: Framing) -> None:
     async with client_slave_pair(framing=framing) as (bus, slave):
         slave.input_registers[0:2] = list(encode_float32(20.378))
         value = await bus.slave(1).read_float(0, source=RegisterSource.INPUT)
-    assert value == pytest.approx(20.378)
+    # math.isclose over pytest.approx — approx's stubs leak Unknown under pyright strict.
+    assert math.isclose(value, 20.378, rel_tol=1e-6)
 
 
 async def test_read_float_defaults_to_holding_fc03() -> None:
@@ -116,7 +119,7 @@ async def test_read_float_defaults_to_holding_fc03() -> None:
     disabled = frozenset({int(FunctionCode.READ_INPUT_REGISTERS)})
     async with client_slave_pair(disabled_function_codes=disabled) as (bus, slave):
         slave.holding_registers[0:2] = list(encode_float32(1.5))
-        assert await bus.slave(1).read_float(0) == pytest.approx(1.5)
+        assert math.isclose(await bus.slave(1).read_float(0), 1.5, rel_tol=1e-6)
         with pytest.raises(IllegalFunctionError):
             await bus.slave(1).read_float(0, source=RegisterSource.INPUT)
 
