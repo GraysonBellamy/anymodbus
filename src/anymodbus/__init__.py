@@ -9,7 +9,9 @@ from anymodbus._types import (
     ByteOrder,
     Capability,
     ExceptionCode,
+    Framing,
     FunctionCode,
+    RegisterSource,
     RegisterType,
     WordOrder,
     is_idempotent_function,
@@ -24,6 +26,7 @@ from anymodbus.decoders import decode, encode, register_count_for
 from anymodbus.exceptions import (
     AcknowledgeError,
     BusClosedError,
+    ChecksumError,
     ConfigurationError,
     ConnectionLostError,
     CRCError,
@@ -34,6 +37,7 @@ from anymodbus.exceptions import (
     IllegalDataAddressError,
     IllegalDataValueError,
     IllegalFunctionError,
+    LRCError,
     MemoryParityError,
     ModbusError,
     ModbusExceptionResponse,
@@ -45,7 +49,7 @@ from anymodbus.exceptions import (
     UnexpectedResponseError,
 )
 from anymodbus.slave import Slave
-from anymodbus.stream import open_modbus_rtu
+from anymodbus.stream import open_modbus_ascii, open_modbus_rtu
 
 #: Short alias for :class:`FunctionCode`. The class docstring promised it; we
 #: deliver. Use ``anymodbus.FC.READ_HOLDING_REGISTERS`` if the long name is
@@ -61,23 +65,27 @@ __all__ = [
     "ByteOrder",
     "CRCError",
     "Capability",
+    "ChecksumError",
     "ConfigurationError",
     "ConnectionLostError",
     "ExceptionCode",
     "FrameError",
     "FrameTimeoutError",
+    "Framing",
     "FunctionCode",
     "GatewayPathUnavailableError",
     "GatewayTargetFailedToRespondError",
     "IllegalDataAddressError",
     "IllegalDataValueError",
     "IllegalFunctionError",
+    "LRCError",
     "MemoryParityError",
     "ModbusError",
     "ModbusExceptionResponse",
     "ModbusUnknownExceptionError",
     "ModbusUnsupportedFunctionError",
     "ProtocolError",
+    "RegisterSource",
     "RegisterType",
     "RetryPolicy",
     "Slave",
@@ -93,6 +101,7 @@ __all__ = [
     "is_idempotent_function",
     "is_read_function",
     "is_write_function",
+    "open_modbus_ascii",
     "open_modbus_rtu",
     "register_count_for",
 ]

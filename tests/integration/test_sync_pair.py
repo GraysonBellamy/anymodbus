@@ -120,6 +120,25 @@ def test_sync_read_float_roundtrip(
     assert math.isclose(value, 78.295, rel_tol=1e-6)
 
 
+def test_sync_diagnostic_loopback(
+    sync_pair: tuple[SyncBus, MockSlave],
+) -> None:
+    bus, _slave = sync_pair
+    assert bus.slave(1).diagnostic_loopback(b"\xab\xcd") == b"\xab\xcd"
+
+
+def test_sync_read_float_input_source(
+    sync_pair: tuple[SyncBus, MockSlave],
+) -> None:
+    from anymodbus import RegisterSource  # noqa: PLC0415
+    from anymodbus.decoders import encode_float32  # noqa: PLC0415
+
+    bus, slave = sync_pair
+    slave.input_registers[0:2] = list(encode_float32(20.378))
+    value = bus.slave(1).read_float(0, source=RegisterSource.INPUT)
+    assert math.isclose(value, 20.378, rel_tol=1e-6)
+
+
 def test_sync_broadcast_write_register(
     sync_pair: tuple[SyncBus, MockSlave],
 ) -> None:
