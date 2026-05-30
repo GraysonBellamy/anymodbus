@@ -22,6 +22,7 @@ class FunctionCode(IntEnum):
     READ_INPUT_REGISTERS = 0x04
     WRITE_SINGLE_COIL = 0x05
     WRITE_SINGLE_REGISTER = 0x06
+    DIAGNOSTICS = 0x08
     WRITE_MULTIPLE_COILS = 0x0F
     WRITE_MULTIPLE_REGISTERS = 0x10
     MASK_WRITE_REGISTER = 0x16
@@ -47,10 +48,12 @@ _WRITE_FUNCTION_CODES = frozenset(
     }
 )
 # Function codes safe to retry by default on transient transport errors. The
-# concept is "no observable side effect on the slave if we re-fire": pure
-# reads only. FC 23 is excluded because it has a write half; FC 22 is
-# excluded because it depends on the slave's current value.
-_IDEMPOTENT_FUNCTION_CODES = _READ_FUNCTION_CODES
+# concept is "no observable side effect on the slave if we re-fire": the pure
+# reads (FC 1-4) plus FC 8 Diagnostics (we only model sub-function 0x0000,
+# Return Query Data, a side-effect-free loopback). FC 23 is excluded because it
+# has a write half; FC 22 is excluded because it depends on the slave's current
+# value.
+_IDEMPOTENT_FUNCTION_CODES = _READ_FUNCTION_CODES | {FunctionCode.DIAGNOSTICS}
 
 
 def is_read_function(fc: FunctionCode | int) -> bool:
@@ -76,10 +79,11 @@ def is_idempotent_function(fc: FunctionCode | int) -> bool:
 
     Used by :class:`RetryPolicy` when ``retry_idempotent_only=True``: only
     function codes that have no side effect on the slave qualify, so a lost
-    response can be re-driven without risk of double-firing a write. Today
-    that's exactly FC 1-4. FC 23 (Read/Write Multiple) is excluded because
-    it has a write half; FC 22 (Mask Write) is excluded because the result
-    depends on the slave's current value.
+    response can be re-driven without risk of double-firing a write. That's
+    FC 1-4 plus FC 8 (Diagnostics — only the side-effect-free sub-function
+    0x0000 loopback is modelled). FC 23 (Read/Write Multiple) is excluded
+    because it has a write half; FC 22 (Mask Write) is excluded because the
+    result depends on the slave's current value.
     """
     try:
         code = FunctionCode(fc)
@@ -106,6 +110,32 @@ class ExceptionCode(IntEnum):
     MEMORY_PARITY_ERROR = 0x08
     GATEWAY_PATH_UNAVAILABLE = 0x0A
     GATEWAY_TARGET_FAILED_TO_RESPOND = 0x0B
+
+
+class Framing(StrEnum):
+    """Serial transmission framing mode (*Modbus over Serial Line v1.02 §2.5*).
+
+    Selects how a :class:`anymodbus.Bus` wraps PDUs on the wire. The PDU/register
+    layer is identical across framings; only the ADU envelope differs.
+
+    - :attr:`RTU`: binary, trailing CRC-16, length-aware receive.
+    - :attr:`ASCII`: ``':'`` start, ASCII-hex body, trailing LRC, ``CRLF`` end.
+    """
+
+    RTU = "rtu"
+    ASCII = "ascii"
+
+
+class RegisterSource(StrEnum):
+    """Which register bank a typed read targets.
+
+    Used by :meth:`Slave.read_float` / :meth:`read_int32` / :meth:`read_string`
+    to choose between holding registers (FC 0x03, read/write) and input
+    registers (FC 0x04, read-only). Defaults to :attr:`HOLDING` for back-compat.
+    """
+
+    HOLDING = "holding"  # FC 0x03
+    INPUT = "input"  # FC 0x04
 
 
 class RegisterType(StrEnum):
@@ -181,7 +211,9 @@ __all__ = [
     "ByteOrder",
     "Capability",
     "ExceptionCode",
+    "Framing",
     "FunctionCode",
+    "RegisterSource",
     "RegisterType",
     "WordOrder",
     "is_idempotent_function",

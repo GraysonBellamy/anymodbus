@@ -340,7 +340,47 @@ def decode_write_multiple_registers_response(pdu: bytes) -> tuple[int, int]:
     )
 
 
+# ---------------------------------------------------------------------------
+# FC 0x08 Diagnostics — sub-function 0x0000 (Return Query Data / loopback).
+#
+# Only sub-0 is modelled: it echoes a 2-byte data word, mutating nothing, which
+# is exactly what the AUTO-probe / link-health use case needs. Other FC08
+# sub-functions are variable-length and some return no response at all; keeping
+# this client to sub-0 only is what makes the RTU framer's fixed 6-byte tail
+# safe (see framer.py).
+# ---------------------------------------------------------------------------
+
+_DIAG_SUBFN_RETURN_QUERY_DATA = 0x0000
+_DIAG_DATA_LEN = 2
+_DIAG_RESPONSE_PDU_LEN = 5  # fc(1) + subfn(2) + data(2)
+
+
+def encode_diagnostic_loopback_request(data: bytes = b"\x00\x00") -> bytes:
+    """FC 0x08 sub 0x0000 (Return Query Data). ``data`` must be exactly 2 bytes."""
+    if len(data) != _DIAG_DATA_LEN:
+        msg = f"diagnostic loopback data must be exactly 2 bytes (got {len(data)})"
+        raise ValueError(msg)
+    return struct.pack(">BH", FunctionCode.DIAGNOSTICS, _DIAG_SUBFN_RETURN_QUERY_DATA) + data
+
+
+def decode_diagnostic_loopback_response(pdu: bytes) -> bytes:
+    """Return the echoed 2-byte data word from an FC 0x08 sub-0 response.
+
+    Raises :class:`ProtocolError` on a malformed or non-sub-0 response.
+    """
+    _check_fc(pdu, FunctionCode.DIAGNOSTICS)
+    if len(pdu) != _DIAG_RESPONSE_PDU_LEN:
+        msg = f"FC 0x08 response: expected {_DIAG_RESPONSE_PDU_LEN}-byte PDU, got {len(pdu)}"
+        raise ProtocolError(msg)
+    (subfn,) = struct.unpack(">H", pdu[1:3])
+    if subfn != _DIAG_SUBFN_RETURN_QUERY_DATA:
+        msg = f"FC 0x08 response: expected sub-function 0x0000, got {subfn:#06x}"
+        raise ProtocolError(msg)
+    return pdu[3:5]
+
+
 __all__ = [
+    "decode_diagnostic_loopback_response",
     "decode_read_coils_response",
     "decode_read_discrete_inputs_response",
     "decode_read_holding_registers_response",
@@ -349,6 +389,7 @@ __all__ = [
     "decode_write_multiple_registers_response",
     "decode_write_single_coil_response",
     "decode_write_single_register_response",
+    "encode_diagnostic_loopback_request",
     "encode_read_coils_request",
     "encode_read_discrete_inputs_request",
     "encode_read_holding_registers_request",

@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover — anyserial is a hard dep, but be defe
     SerialPort = None  # type: ignore[assignment, misc]
     SerialStreamAttribute = None  # type: ignore[assignment, misc]
 
-from anymodbus._types import FunctionCode, is_idempotent_function
+from anymodbus._types import Framing, FunctionCode, is_idempotent_function
 from anymodbus.config import BusConfig
 from anymodbus.exceptions import (
     BusClosedError,
@@ -37,7 +37,7 @@ from anymodbus.exceptions import (
     FrameTimeoutError,
     ModbusError,
 )
-from anymodbus.framer import encode_adu, read_response_adu
+from anymodbus.framing import Framer, get_framer, interpret_response_pdu
 from anymodbus.pdu import (
     encode_write_multiple_coils_request,
     encode_write_multiple_registers_request,
@@ -123,10 +123,13 @@ class Bus:
     __slots__ = (
         "_closed",
         "_config",
+        "_framer",
+        "_framing",
         "_inter_char_idle",
         "_inter_frame_idle",
         "_last_io_monotonic",
         "_lock",
+        "_startup_settled",
         "_stream",
         "_timing_resolved",
     )
@@ -136,11 +139,15 @@ class Bus:
         stream: anyio.abc.ByteStream,
         *,
         config: BusConfig | None = None,
+        framing: Framing = Framing.RTU,
     ) -> None:
         self._stream = stream
         self._config: BusConfig = config if config is not None else BusConfig()
+        self._framing: Framing = framing
+        self._framer: Framer = get_framer(framing)
         self._lock = anyio.Lock()
         self._last_io_monotonic: float = 0.0
+        self._startup_settled = False
         self._closed = False
         # Lazy-resolved on first use; the stream may not have its config set
         # at __init__ time (e.g. it gets reconfigured before first I/O).
@@ -164,6 +171,11 @@ class Bus:
     def config(self) -> BusConfig:
         """Active :class:`BusConfig`."""
         return self._config
+
+    @property
+    def framing(self) -> Framing:
+        """The wire framing this bus speaks (:attr:`Framing.RTU` or ``ASCII``)."""
+        return self._framing
 
     @property
     def is_open(self) -> bool:
@@ -318,7 +330,7 @@ class Bus:
             )
             raise ValueError(msg)
 
-        adu = encode_adu(slave_address=_BROADCAST_ADDRESS, pdu=request_pdu)
+        adu = self._framer.encode_adu(slave_address=_BROADCAST_ADDRESS, pdu=request_pdu)
         async with self._lock:
             self._ensure_timing_resolved()
             await self._await_inter_frame_gap()
@@ -369,8 +381,15 @@ class Bus:
     async def _await_inter_frame_gap(self) -> None:
         """Sleep until at least ``inter_frame_idle`` seconds since the last I/O."""
         if self._last_io_monotonic == 0.0:
-            # First transaction on this bus — assume the wire has been idle
-            # for far longer than t3.5 already.
+            # First transaction on this bus. The wire has been idle for far
+            # longer than t3.5 already, so no inter-frame gap is needed — but a
+            # freshly-opened RS485 link may want a one-shot startup settle to
+            # absorb adapter / receiver warm-up before the first frame.
+            if not self._startup_settled:
+                self._startup_settled = True
+                startup = self._config.timing.startup_settle
+                if startup > 0:
+                    await anyio.sleep(startup)
             return
         elapsed = anyio.current_time() - self._last_io_monotonic
         if elapsed < self._inter_frame_idle:
@@ -410,7 +429,7 @@ class Bus:
         await self._await_inter_frame_gap()
         await self._maybe_reset_input()
 
-        adu = encode_adu(slave_address=slave_address, pdu=request_pdu)
+        adu = self._framer.encode_adu(slave_address=slave_address, pdu=request_pdu)
         if _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug("tx %s", adu.hex())
 
@@ -424,12 +443,20 @@ class Bus:
                 await anyio.sleep(self._config.timing.post_tx_settle)
             try:
                 with anyio.fail_after(self._config.request_timeout):
-                    _, response_pdu = await read_response_adu(
+                    # Framer reads one raw frame; the shared interpreter applies
+                    # framing-agnostic FC semantics (D1). interpret runs outside
+                    # the read's fail_after (no I/O) but inside the transport
+                    # error mapping below.
+                    slave, raw_pdu = await self._framer.read_adu(
                         self._stream,
                         expected_slave_address=slave_address,
-                        expected_function_code=expected_function_code,
                         inter_char_idle=self._inter_char_idle,
                     )
+                _, response_pdu = interpret_response_pdu(
+                    slave_address=slave,
+                    pdu=raw_pdu,
+                    expected_function_code=expected_function_code,
+                )
             except TimeoutError as e:
                 msg = (
                     f"no response from slave 0x{slave_address:02x} for fc "

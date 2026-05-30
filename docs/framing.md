@@ -48,7 +48,7 @@ A `byte_count` > 250 raises `FrameError` immediately. *app §4.1* caps the PDU a
 
 ### 3. Known-but-unsupported FCs (`_KNOWN_UNSUPPORTED`)
 
-FCs 0x07, 0x08, 0x0B, 0x0C, 0x11, 0x14, 0x15, 0x18, 0x2B are defined by the spec but not implemented in v0.1. The framer recognises them and raises `ModbusUnsupportedFunctionError` rather than letting them corrupt the stream by falling into the gap-based fallback.
+FCs 0x07, 0x0B, 0x0C, 0x11, 0x14, 0x15, 0x18, 0x2B are defined by the spec but not implemented. The framer recognises them and raises `ModbusUnsupportedFunctionError` rather than letting them corrupt the stream by falling into the gap-based fallback. (FC 0x08 was in this set before v0.2; sub-0 loopback is now supported via a fixed 6-byte tail.)
 
 ### 4. Truly unknown FCs (gap-based fallback)
 
@@ -64,6 +64,28 @@ Exception responses (FC | 0x80) are handled inline:
 4. Translate the exception code via [`code_to_exception`](https://github.com/GraysonBellamy/anymodbus/blob/main/src/anymodbus/exceptions.py) and raise the matching `ModbusExceptionResponse` subclass.
 
 See [exceptions.md](exceptions.md) for the full code → class mapping.
+
+## Modbus ASCII framing
+
+Since v0.2, the `Bus` selects between RTU and ASCII framing via a narrow `Framer` strategy (`anymodbus.framing.Framer`). The PDU/register codec is shared verbatim; only the ADU envelope differs.
+
+```python
+from anymodbus import Bus, Framing, open_modbus_ascii
+
+# Convenience opener (classic 7E1 wire: data_bits=7; 8 also works):
+bus = await open_modbus_ascii("/dev/ttyUSB0", baudrate=19_200, parity="even", data_bits=7)
+
+# Or bind a stream you own and pick the framing explicitly:
+bus = Bus(my_byte_stream, framing=Framing.ASCII)
+```
+
+The ASCII frame is `:` · `ADDR`(2 hex) · `FUNC…DATA`(2·N hex) · `LRC`(2 hex) · `CR LF`. Each byte of `{addr || pdu || lrc}` is two uppercase ASCII-hex characters on transmit (either case accepted on receive). The checksum is the 8-bit two's-complement **LRC** (*serial §6.2*), exposed as pure functions at [`anymodbus.lrc`](https://github.com/GraysonBellamy/anymodbus/blob/main/src/anymodbus/lrc.py) (`lrc8` / `lrc8_bytes` / `verify_lrc`), mirroring `anymodbus.crc`.
+
+ASCII receive is **delimiter-based** (read to `CRLF`) rather than length-aware, so there is no per-FC length table — FC 0x08 and any future FC frame for free. The reader is byte-at-a-time, so it never over-reads past one `CRLF` into a following reader's bytes (important when a caller shares one port across protocols). A frame whose LRC fails raises `LRCError` (a `ChecksumError`, like `CRCError`); a corrupt frame addressed to *another* slave is skipped, matching the RTU stray-drain. Both framings funnel response interpretation through the single shared `interpret_response_pdu`, so they can never diverge.
+
+## FC 0x08 diagnostic loopback
+
+`Slave.diagnostic_loopback(data=b"\x00\x00")` issues FC 0x08 sub-function 0x0000 (Return Query Data) and returns the echoed 2-byte word — a cheap, side-effect-free liveness / round-trip probe. Under RTU the response is length-framed by a fixed 6-byte tail (`subfunction(2) + data(2) + crc(2)`); under ASCII it frames for free. Only sub-0 is modelled.
 
 ## Tests
 

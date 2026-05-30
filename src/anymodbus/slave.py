@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from anymodbus._types import ByteOrder, Capability, FunctionCode, WordOrder
+from anymodbus._types import ByteOrder, Capability, FunctionCode, RegisterSource, WordOrder
 from anymodbus.capabilities import SlaveCapabilities
 from anymodbus.decoders import (
     decode_float32,
@@ -25,8 +25,10 @@ from anymodbus.exceptions import (
     FrameTimeoutError,
     IllegalDataAddressError,
     IllegalFunctionError,
+    UnexpectedResponseError,
 )
 from anymodbus.pdu import (
+    decode_diagnostic_loopback_response,
     decode_read_coils_response,
     decode_read_discrete_inputs_response,
     decode_read_holding_registers_response,
@@ -35,6 +37,7 @@ from anymodbus.pdu import (
     decode_write_multiple_registers_response,
     decode_write_single_coil_response,
     decode_write_single_register_response,
+    encode_diagnostic_loopback_request,
     encode_read_coils_request,
     encode_read_discrete_inputs_request,
     encode_read_holding_registers_request,
@@ -218,12 +221,21 @@ class Slave:
     # Higher-level helpers — float / int32 / string with explicit ordering.
     # ------------------------------------------------------------------
 
+    async def _read_words(
+        self, address: int, count: int, source: RegisterSource
+    ) -> tuple[int, ...]:
+        """Read ``count`` registers from the holding (FC03) or input (FC04) bank."""
+        if source is RegisterSource.INPUT:
+            return await self.read_input_registers(address, count=count)
+        return await self.read_holding_registers(address, count=count)
+
     async def read_float(
         self,
         address: int,
         *,
         word_order: WordOrder = WordOrder.HIGH_LOW,
         byte_order: ByteOrder = ByteOrder.BIG,
+        source: RegisterSource = RegisterSource.HOLDING,
     ) -> float:
         """Read two registers and decode as IEEE 754 float32.
 
@@ -232,8 +244,12 @@ class Slave:
         Modbus spec does not standardize multi-register word ordering. Pass
         ``word_order`` / ``byte_order`` explicitly when your device's
         protocol manual specifies a different layout.
+
+        ``source`` selects the register bank: :attr:`RegisterSource.HOLDING`
+        (FC03, default) or :attr:`RegisterSource.INPUT` (FC04, read-only) —
+        e.g. analysers that publish measurements as input registers.
         """
-        words = await self.read_holding_registers(address, count=_REGISTERS_PER_32BIT)
+        words = await self._read_words(address, _REGISTERS_PER_32BIT, source)
         return decode_float32(words, word_order=word_order, byte_order=byte_order)
 
     async def write_float(
@@ -255,9 +271,13 @@ class Slave:
         signed: bool = True,
         word_order: WordOrder = WordOrder.HIGH_LOW,
         byte_order: ByteOrder = ByteOrder.BIG,
+        source: RegisterSource = RegisterSource.HOLDING,
     ) -> int:
-        """Read two registers and decode as a 32-bit (signed by default) integer."""
-        words = await self.read_holding_registers(address, count=_REGISTERS_PER_32BIT)
+        """Read two registers and decode as a 32-bit (signed by default) integer.
+
+        ``source`` selects holding (FC03, default) or input (FC04) registers.
+        """
+        words = await self._read_words(address, _REGISTERS_PER_32BIT, source)
         return decode_int32(words, signed=signed, word_order=word_order, byte_order=byte_order)
 
     async def write_int32(
@@ -282,6 +302,7 @@ class Slave:
         byte_order: ByteOrder = ByteOrder.BIG,
         encoding: str = "ascii",
         strip_null: bool = True,
+        source: RegisterSource = RegisterSource.HOLDING,
     ) -> str:
         """Read a string field. Specify length as ``register_count`` or ``byte_count``.
 
@@ -292,7 +313,8 @@ class Slave:
         Exactly one of ``register_count`` / ``byte_count`` must be supplied.
 
         ``byte_order=LITTLE`` is for devices that store strings byte-swapped
-        within each register.
+        within each register. ``source`` selects holding (FC03, default) or
+        input (FC04) registers.
         """
         if (register_count is None) == (byte_count is None):
             msg = "supply exactly one of register_count or byte_count"
@@ -302,7 +324,7 @@ class Slave:
             count = (byte_count + 1) // 2
         else:
             count = register_count
-        words = await self.read_holding_registers(address, count=count)
+        words = await self._read_words(address, count, source)
         decoded = decode_string(words, byte_order=byte_order, encoding=encoding, strip_null=False)
         if byte_count is not None:
             decoded = decoded[:byte_count]
@@ -334,6 +356,34 @@ class Slave:
             pad=pad,
         )
         await self.write_registers(address, words)
+
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+
+    async def diagnostic_loopback(self, data: bytes = b"\x00\x00") -> bytes:
+        """FC 0x08 sub 0x0000 — echo ``data`` (exactly 2 bytes) off the slave.
+
+        Returns the echoed data word. Side-effect-free, so it is ideal as a
+        liveness / round-trip-jitter probe (and is retried on transient
+        transport errors like the read FCs).
+
+        Raises:
+            ValueError: ``data`` is not exactly 2 bytes.
+            UnexpectedResponseError: the echoed data does not match what was
+                sent.
+        """
+        pdu = encode_diagnostic_loopback_request(data)
+        response_pdu = await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
+            slave_address=self.address,
+            request_pdu=pdu,
+            expected_function_code=FunctionCode.DIAGNOSTICS,
+        )
+        echoed = decode_diagnostic_loopback_response(response_pdu)
+        if echoed != data:
+            msg = f"loopback echo {echoed!r} does not match sent data {data!r}"
+            raise UnexpectedResponseError(msg)
+        return echoed
 
     # ------------------------------------------------------------------
     # Capability probing
