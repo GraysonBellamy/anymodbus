@@ -79,16 +79,16 @@ jobs:
       - name: Install Python ${{ matrix.python }}
         run: uv python install ${{ matrix.python }}
       - name: Install dependencies
-        run: uv sync --python ${{ matrix.python }} --all-extras --group test
+        run: uv sync --python ${{ matrix.python }} --all-extras --no-default-groups --group test
       - name: Run unit tests
         run: >
-          uv run --python ${{ matrix.python }} pytest
+          uv run --no-sync --python ${{ matrix.python }} pytest
           tests/unit
           --cov --cov-report=xml -v
       - name: Run integration tests (Linux only — PTY-backed pair)
         if: runner.os == 'Linux'
         run: >
-          uv run --python ${{ matrix.python }} pytest
+          uv run --no-sync --python ${{ matrix.python }} pytest
           tests/integration
           --cov --cov-append --cov-report=xml -v
       - name: Upload coverage
