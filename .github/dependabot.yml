@@ -16,7 +16,7 @@ updates:
       include: "scope"
 
   # Python dependencies tracked in uv.lock
-  - package-ecosystem: "uv"
+  - package-ecosystem: uv
     directory: "/"
     schedule:
       interval: "monthly"
