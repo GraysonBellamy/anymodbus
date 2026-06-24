@@ -90,11 +90,11 @@ async def client_slave_pair(
     )
     try:
         async with anyio.create_task_group() as tg:
-            tg.start_soon(slave.serve, slave_end)
+            _ = tg.start_soon(slave.serve, slave_end)
             try:
                 yield bus, slave
             finally:
-                tg.cancel_scope.cancel()
+                tg.cancel()
     finally:
         with anyio.CancelScope(shield=True):
             await bus.aclose()

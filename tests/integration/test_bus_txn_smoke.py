@@ -132,7 +132,7 @@ async def test_bus_txn_read_holding_registers_roundtrip() -> None:
     expected = (0x0001, 0x0203, 0x0405)
     result: tuple[int, ...] = ()
     async with anyio.create_task_group() as tg, bus, slave_end:
-        tg.start_soon(_serve_one_fc03, slave_end, 1, expected)
+        _ = tg.start_soon(_serve_one_fc03, slave_end, 1, expected)
         result = await bus.slave(1).read_holding_registers(0x0010, count=3)
     assert result == expected
 
@@ -153,7 +153,7 @@ async def test_bus_txn_serializes_concurrent_callers() -> None:
     results: dict[int, int] = {}
 
     async with anyio.create_task_group() as tg, bus, slave_end:
-        tg.start_soon(_serve_n, slave_end, 1, handler, len(addresses))
+        _ = tg.start_soon(_serve_n, slave_end, 1, handler, len(addresses))
 
         async def fetch(addr: int) -> None:
             (val,) = await bus.slave(1).read_holding_registers(addr, count=1)
@@ -161,7 +161,7 @@ async def test_bus_txn_serializes_concurrent_callers() -> None:
 
         async with anyio.create_task_group() as inner:
             for a in addresses:
-                inner.start_soon(fetch, a)
+                _ = inner.start_soon(fetch, a)
 
     assert results == {a: a for a in addresses}
 
@@ -211,7 +211,7 @@ async def test_bus_txn_modbus_exception_not_retried() -> None:
         # block forever waiting for a second response (and pytest would
         # eventually fail by timeout). The narrow expectation is that
         # IllegalDataAddressError surfaces on the first try.
-        tg.start_soon(_serve_n, slave_end, 1, respond_exception, 1)
+        _ = tg.start_soon(_serve_n, slave_end, 1, respond_exception, 1)
         with pytest.raises(IllegalDataAddressError):
             await bus.slave(1).read_holding_registers(0x9999, count=1)
 
@@ -245,7 +245,7 @@ async def test_bus_broadcast_write_register_no_response_expected() -> None:
         received.append(pdu)
 
     async with anyio.create_task_group() as tg, bus, slave_end:
-        tg.start_soon(collector, slave_end)
+        _ = tg.start_soon(collector, slave_end)
         # broadcast_write_register returns None — the call completing without
         # blocking on rx is the assertion (combined with the request-frame
         # check below).
@@ -270,7 +270,7 @@ async def test_bus_broadcast_holds_turnaround_delay() -> None:
 
     elapsed = 0.0
     async with anyio.create_task_group() as tg, bus, slave_end:
-        tg.start_soon(consume_one, slave_end)
+        _ = tg.start_soon(consume_one, slave_end)
         start = anyio.current_time()
         await bus.broadcast_write_register(0x0010, 0x1234)
         elapsed = anyio.current_time() - start
@@ -296,7 +296,7 @@ async def test_bus_honours_post_tx_settle() -> None:
     elapsed = 0.0
 
     async with anyio.create_task_group() as tg, bus, slave_end:
-        tg.start_soon(_serve_one_fc03, slave_end, 1, expected)
+        _ = tg.start_soon(_serve_one_fc03, slave_end, 1, expected)
         start = anyio.current_time()
         result = await bus.slave(1).read_holding_registers(0, count=1)
         elapsed = anyio.current_time() - start

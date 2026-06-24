@@ -155,7 +155,7 @@ async def test_concurrent_callers_serialize_through_bus_lock() -> None:
 
         async with anyio.create_task_group() as tg:
             for addr in range(16):
-                tg.start_soon(fetch, addr)
+                _ = tg.start_soon(fetch, addr)
 
     assert results == {addr: 0x1000 | addr for addr in range(16)}
 
