@@ -166,7 +166,7 @@ async with client_slave_pair(slave_address=1) as (bus, mock):
 
 ## Documentation
 
-Full documentation will live at <https://graysonbellamy.github.io/anymodbus/>. Starting points:
+Full documentation will live at <https://anymodbus.graysonbellamy.dev/>. Starting points:
 
 - [Quickstart](docs/quickstart.md)
 - [Configuration](docs/configuration.md)
