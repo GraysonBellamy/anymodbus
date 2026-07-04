@@ -1,7 +1,7 @@
 [project]
 site_name = "anymodbus"
 site_description = "Async-native Modbus RTU client for Python, built on AnyIO and anyserial."
-site_url = "https://graysonbellamy.github.io/anymodbus/"
+site_url = "https://anymodbus.graysonbellamy.dev/"
 repo_url = "https://github.com/GraysonBellamy/anymodbus"
 repo_name = "GraysonBellamy/anymodbus"
 edit_uri = "edit/main/docs/"
