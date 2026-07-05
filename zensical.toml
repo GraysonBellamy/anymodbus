@@ -66,6 +66,11 @@ accent = "blue"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to light mode"
 
+[[project.extra.social]]
+icon = "fontawesome/solid/house"
+link = "https://graysonbellamy.dev"
+name = "graysonbellamy.dev"
+
 [project.markdown_extensions.admonition]
 
 [project.markdown_extensions.attr_list]
