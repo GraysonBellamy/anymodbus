@@ -65,7 +65,7 @@ jobs:
         include:
           # Linux-only: free-threaded build check (advisory)
           - os: ubuntu-latest
-            python: "3.13t"
+            python: "3.14t"
             allow-failure: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.allow-failure == true }}
