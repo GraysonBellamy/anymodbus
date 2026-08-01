@@ -18,11 +18,13 @@ The high-level API surfaces are similar. The main differences are vocabulary (`d
 ```python
 # pymodbus
 from pymodbus.client import AsyncModbusSerialClient
+
 client = AsyncModbusSerialClient("/dev/ttyUSB0", baudrate=19200, parity="N")
 await client.connect()
 
 # anymodbus
 from anymodbus import open_modbus_rtu
+
 bus = await open_modbus_rtu("/dev/ttyUSB0", baudrate=19200, parity="none")
 # baudrate and parity are required keywords — no defaults.
 ```
@@ -45,6 +47,7 @@ regs = await bus.slave(1).read_holding_registers(0, count=4)
 ```python
 # pymodbus 4.x — convert_from_registers classmethod
 from pymodbus.client.mixin import ModbusClientMixin
+
 result = await client.read_holding_registers(0x40, count=2, device_id=1)
 value = ModbusClientMixin.convert_from_registers(
     result.registers,
@@ -57,6 +60,7 @@ value = await bus.slave(1).read_float(0x40)
 
 # Or for a device that stores the low word first:
 from anymodbus import WordOrder
+
 value = await bus.slave(1).read_float(0x40, word_order=WordOrder.LOW_HIGH)
 ```
 

@@ -86,7 +86,7 @@ from anymodbus import WordOrder
 
 async with await open_modbus_rtu("/dev/ttyUSB0", baudrate=19_200, parity="even") as bus:
     slave = bus.slave(address=1)
-    high_low_value = await slave.read_float(0x0040)                              # default
+    high_low_value = await slave.read_float(0x0040)  # default
     low_high_value = await slave.read_float(0x0044, word_order=WordOrder.LOW_HIGH)
 ```
 
@@ -119,12 +119,13 @@ async with await open_modbus_ascii(
 ) as bus:
     slave = bus.slave(30)
     # Cheap, side-effect-free liveness probe (FC08 sub-0 loopback):
-    assert await slave.diagnostic_loopback(b"\xAB\xCD") == b"\xAB\xCD"
+    assert await slave.diagnostic_loopback(b"\xab\xcd") == b"\xab\xcd"
     # Read a measurement published as input registers (FC04):
     o2 = await slave.read_float(0, source=RegisterSource.INPUT)
 
 # Caller-owned stream (e.g. a port shared across modes): pick framing explicitly.
 from anymodbus import Bus
+
 bus = Bus(my_byte_stream, framing=Framing.ASCII)
 ```
 

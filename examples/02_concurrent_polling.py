@@ -24,7 +24,8 @@ async def main(paths: list[str]) -> None:
     results: dict[str, tuple[int, ...]] = {}
     async with anyio.create_task_group() as tg:
         for path in paths:
-            tg.start_soon(poll_one, path, results)
+            # The task group awaits its children on exit; the handle isn't needed.
+            _ = tg.start_soon(poll_one, path, results)
     for path, regs in results.items():
         sys.stdout.write(f"{path}: {regs}\n")
 

@@ -7,6 +7,7 @@
 ```python
 # minimalmodbus
 import minimalmodbus
+
 inst = minimalmodbus.Instrument("/dev/ttyUSB0", 1)
 inst.serial.baudrate = 19_200
 inst.serial.parity = "N"
@@ -23,6 +24,7 @@ async with await open_modbus_rtu("/dev/ttyUSB0", baudrate=19_200, parity="none")
 
 # anymodbus, sync
 from anymodbus.sync import open_modbus_rtu
+
 with open_modbus_rtu("/dev/ttyUSB0", baudrate=19_200, parity="none") as bus:
     inst = bus.slave(1)
     regs = inst.read_holding_registers(0, count=4, timeout=1.0)

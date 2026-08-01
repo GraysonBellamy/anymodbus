@@ -107,14 +107,15 @@ bus = await open_modbus_rtu(
     baudrate=19_200,
     parity="even",
     config=BusConfig(
-        request_timeout=3.0,                    # default
-        retries=RetryPolicy(retries=1),         # default
+        request_timeout=3.0,  # default
+        retries=RetryPolicy(retries=1),  # default
         # timing.inter_frame_idle defaults to "auto" — computes 3.5 char-times from baud
     ),
 )
 
 # Or wrap an existing stream (e.g., test pair, future TCP):
 from anyserial import open_serial_port, SerialConfig, Parity
+
 port = await open_serial_port(
     "/dev/ttyUSB0",
     SerialConfig(baudrate=19_200, parity=Parity.EVEN),
@@ -125,25 +126,24 @@ bus = Bus(port, config=BusConfig())
 ### 5.2 Per-slave handle
 
 ```python
-slave = bus.slave(address=1)            # Slave handle is cheap, no I/O.
+slave = bus.slave(address=1)  # Slave handle is cheap, no I/O.
 
 # Standard FCs:
-coils = await slave.read_coils(0, count=8)                      # FC 0x01
-disc  = await slave.read_discrete_inputs(0, count=16)           # FC 0x02
-regs  = await slave.read_holding_registers(0x0040, count=2)     # FC 0x03
-ins   = await slave.read_input_registers(0, count=4)            # FC 0x04
-await slave.write_coil(0, on=True)                              # FC 0x05
-await slave.write_register(0x0080, value=2500)                  # FC 0x06
-await slave.write_coils(0, [True, False, True, True])           # FC 0x0F
-await slave.write_registers(0x0040, [0x977D, 0x429C])           # FC 0x10
+coils = await slave.read_coils(0, count=8)  # FC 0x01
+disc = await slave.read_discrete_inputs(0, count=16)  # FC 0x02
+regs = await slave.read_holding_registers(0x0040, count=2)  # FC 0x03
+ins = await slave.read_input_registers(0, count=4)  # FC 0x04
+await slave.write_coil(0, on=True)  # FC 0x05
+await slave.write_register(0x0080, value=2500)  # FC 0x06
+await slave.write_coils(0, [True, False, True, True])  # FC 0x0F
+await slave.write_registers(0x0040, [0x977D, 0x429C])  # FC 0x10
 
 # v0.2:
-await slave.mask_write_register(addr, and_mask=..., or_mask=...) # FC 0x16
-await slave.read_write_registers(read_addr, read_count,
-                                 write_addr, write_values)       # FC 0x17
+await slave.mask_write_register(addr, and_mask=..., or_mask=...)  # FC 0x16
+await slave.read_write_registers(read_addr, read_count, write_addr, write_values)  # FC 0x17
 
 # Per-type helpers + dispatcher (in anymodbus.decoders, also exposed on Slave for the common cases):
-hv = await slave.read_float(0x0040)                              # high_low default
+hv = await slave.read_float(0x0040)  # high_low default
 lv = await slave.read_float(0x0044, word_order="low_high")
 await slave.write_float(0x0040, 78.295, word_order="high_low")
 ```
@@ -244,18 +244,20 @@ _BYTE_COUNT_1B: Final[frozenset[int]] = frozenset({0x01, 0x02, 0x03, 0x04, 0x17}
 
 # FCs known to the spec but not implemented by this version. Recognized so
 # the framer can fail with a precise error rather than mis-frame.
-_KNOWN_UNSUPPORTED: Final[frozenset[int]] = frozenset({
-    0x07,  # Read Exception Status (serial line only)
-    # 0x08 Diagnostics is NOT here since v0.2: sub-0 loopback is supported via
-    # a fixed 6-byte tail in _FIXED_TAIL.
-    0x0B,  # Get Comm Event Counter
-    0x0C,  # Get Comm Event Log
-    0x11,  # Report Server ID
-    0x14,  # Read File Record
-    0x15,  # Write File Record
-    0x18,  # Read FIFO Queue (note: 2-byte byte_count when implemented)
-    0x2B,  # Encapsulated Interface Transport (MEI 0x0E planned for v0.2)
-})
+_KNOWN_UNSUPPORTED: Final[frozenset[int]] = frozenset(
+    {
+        0x07,  # Read Exception Status (serial line only)
+        # 0x08 Diagnostics is NOT here since v0.2: sub-0 loopback is supported via
+        # a fixed 6-byte tail in _FIXED_TAIL.
+        0x0B,  # Get Comm Event Counter
+        0x0C,  # Get Comm Event Log
+        0x11,  # Report Server ID
+        0x14,  # Read File Record
+        0x15,  # Write File Record
+        0x18,  # Read FIFO Queue (note: 2-byte byte_count when implemented)
+        0x2B,  # Encapsulated Interface Transport (MEI 0x0E planned for v0.2)
+    }
+)
 ```
 
 State machine:
@@ -352,8 +354,8 @@ On CRC mismatch:
 class RetryPolicy:
     retries: int = 1
     retry_on: frozenset[type[ModbusError]] = frozenset({CRCError, FrameTimeoutError})
-    retry_idempotent_only: bool = True   # see is_idempotent_function
-    backoff_base: float = 0.0            # extra wait beyond inter_frame_idle
+    retry_idempotent_only: bool = True  # see is_idempotent_function
+    backoff_base: float = 0.0  # extra wait beyond inter_frame_idle
 ```
 
 `retry_idempotent_only=True` blocks silent re-writes — the failure mode being avoided is "the slave received and acted on the write but the response was lost in transit, so we retry and double-fire". Only function codes for which `is_idempotent_function(fc) is True` are retried under that policy — currently FC 1-4. FC 23 (Read/Write Multiple) is **not** automatically retried because of its write half; FC 22 (Mask Write) depends on the slave's current value and is also not auto-retried. Writes only retry when the caller explicitly opts in (`retry_idempotent_only=False`). Modbus exception responses (`IllegalFunctionError` etc.) are never retried — the slave told us no, retrying won't change that — so they are intentionally absent from the default `retry_on` set. `pymodbus` exposes a single `retries: int` applied to all FCs and does not make this distinction.
@@ -366,10 +368,14 @@ Broadcasts have a different transaction shape from unicast — no reply, plus a 
 
 ```python
 class Bus:
-    async def broadcast_write_coil(self, address: int, *, on: bool) -> None: ...        # FC 0x05
-    async def broadcast_write_register(self, address: int, value: int) -> None: ...     # FC 0x06
-    async def broadcast_write_coils(self, address: int, values: Sequence[bool]) -> None: ...    # FC 0x0F
-    async def broadcast_write_registers(self, address: int, values: Sequence[int]) -> None: ... # FC 0x10
+    async def broadcast_write_coil(self, address: int, *, on: bool) -> None: ...  # FC 0x05
+    async def broadcast_write_register(self, address: int, value: int) -> None: ...  # FC 0x06
+    async def broadcast_write_coils(
+        self, address: int, values: Sequence[bool]
+    ) -> None: ...  # FC 0x0F
+    async def broadcast_write_registers(
+        self, address: int, values: Sequence[int]
+    ) -> None: ...  # FC 0x10
 ```
 
 The `Bus.broadcast_*` methods are the *only* way to broadcast — there is no `bus.slave(0)` (it raises `ConfigurationError`; see §5.2). This deliberate asymmetry means callers can't accidentally broadcast a read FC, since the read FCs simply don't exist as `broadcast_*` variants.
@@ -427,6 +433,7 @@ Any code outside this set (notably 0x07, 0x09, and 0x0C–0xFF, which are unassi
 ```python
 class ModbusUnknownExceptionError(ModbusExceptionResponse):
     """Slave returned an exception code not defined by app §7."""
+
     # inherits exception_code: int from ModbusExceptionResponse
 ```
 
@@ -444,11 +451,12 @@ class ModbusCapability(StrEnum):
     UNSUPPORTED = "unsupported"
     UNKNOWN = "unknown"
 
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SlaveCapabilities:
-    function_codes: Mapping[FunctionCode, ModbusCapability]   # Probed lazily.
-    max_coils_per_read: int | None = None                     # Spec: 2000
-    max_registers_per_read: int | None = None                 # Spec: 125
+    function_codes: Mapping[FunctionCode, ModbusCapability]  # Probed lazily.
+    max_coils_per_read: int | None = None  # Spec: 2000
+    max_registers_per_read: int | None = None  # Spec: 125
 ```
 
 `Slave.probe()` runs FC 0x03 / 0x04 with `count=1` against a few well-known offsets and maps the outcome:
@@ -592,6 +600,7 @@ class MockSlave:
 
     async def serve(self, stream: anyio.abc.ByteStream) -> None:
         """Read requests, write responses, until cancelled."""
+
 
 def client_slave_pair(*, slave_address: int = 1) -> tuple[Bus, MockSlave]:
     """Returns (bus, slave) pair backed by anyserial's serial_port_pair."""

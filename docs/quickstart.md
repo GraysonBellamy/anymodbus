@@ -25,9 +25,7 @@ from anymodbus import open_modbus_rtu
 
 
 async def main() -> None:
-    async with await open_modbus_rtu(
-        "/dev/ttyUSB0", baudrate=19_200, parity="even"
-    ) as bus:
+    async with await open_modbus_rtu("/dev/ttyUSB0", baudrate=19_200, parity="even") as bus:
         slave = bus.slave(address=1)
         regs = await slave.read_holding_registers(0x0040, count=2)
         print(regs)
@@ -52,9 +50,7 @@ with open_modbus_rtu("/dev/ttyUSB0", baudrate=19_200, parity="even") as bus:
 Word order varies by device. The default matches the Modbus Application Protocol spec's worked example (high-word-first, big-endian within word) — equivalent to `struct.pack(">f", ...)`.
 
 ```python
-async with await open_modbus_rtu(
-    "/dev/ttyUSB0", baudrate=19_200, parity="even"
-) as bus:
+async with await open_modbus_rtu("/dev/ttyUSB0", baudrate=19_200, parity="even") as bus:
     slave = bus.slave(address=1)
     value = await slave.read_float(0x0040)  # WordOrder.HIGH_LOW default
     print(f"value = {value:.2f}")
@@ -64,6 +60,7 @@ If your device stores the low word first, pass it explicitly:
 
 ```python
 from anymodbus import WordOrder
+
 value = await slave.read_float(0x0040, word_order=WordOrder.LOW_HIGH)
 ```
 

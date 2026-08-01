@@ -7,8 +7,8 @@ Modbus registers are 16 bits wide, but real devices store 32-bit integers and IE
 ```python
 from anymodbus import WordOrder
 
-WordOrder.HIGH_LOW   # most-significant word first — equivalent to struct.pack(">f", ...)
-WordOrder.LOW_HIGH   # least-significant word first
+WordOrder.HIGH_LOW  # most-significant word first — equivalent to struct.pack(">f", ...)
+WordOrder.LOW_HIGH  # least-significant word first
 ```
 
 ## `ByteOrder`
@@ -16,7 +16,7 @@ WordOrder.LOW_HIGH   # least-significant word first
 ```python
 from anymodbus import ByteOrder
 
-ByteOrder.BIG     # big-endian within each 16-bit register word — Modbus norm
+ByteOrder.BIG  # big-endian within each 16-bit register word — Modbus norm
 ByteOrder.LITTLE  # little-endian within each word — rare
 ```
 
@@ -63,6 +63,7 @@ If you're writing a device driver — say, for a specific temperature controller
 from anymodbus import Slave, WordOrder
 
 DEVICE_WORD_ORDER = WordOrder.LOW_HIGH  # this device stores LSW first
+
 
 async def read_setpoint(slave: Slave, address: int) -> float:
     return await slave.read_float(address, word_order=DEVICE_WORD_ORDER)

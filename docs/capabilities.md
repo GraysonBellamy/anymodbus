@@ -42,14 +42,14 @@ If you need to know whether writes work, the only honest answer is to try one ag
 ```python
 from anymodbus import SlaveCapabilities
 
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SlaveCapabilities:
     function_codes: Mapping[FunctionCode, Capability]
     max_coils_per_read: int | None = None
     max_registers_per_read: int | None = None
 
-    def get(self, fc: FunctionCode) -> Capability:
-        ...  # defaults to UNKNOWN
+    def get(self, fc: FunctionCode) -> Capability: ...  # defaults to UNKNOWN
 ```
 
 `max_coils_per_read` / `max_registers_per_read` aren't filled in by `probe()` — they're caller-set hints for code that wants to chunk a large request. Spec ceilings are 2000 coils / 125 registers; many real devices accept fewer.

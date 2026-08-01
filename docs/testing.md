@@ -55,10 +55,10 @@ async with client_slave_pair(
 
 ```python
 plan = FaultPlan(
-    corrupt_crc_after_n=2,        # 3rd response gets a flipped CRC bit
-    delay_response_seconds=0.5,   # all responses delayed 500 ms
-    wrong_slave_address=42,       # responses echo the wrong address byte
-    drop_response_after_n=10,     # 11th response is dropped entirely
+    corrupt_crc_after_n=2,  # 3rd response gets a flipped CRC bit
+    delay_response_seconds=0.5,  # all responses delayed 500 ms
+    wrong_slave_address=42,  # responses echo the wrong address byte
+    drop_response_after_n=10,  # 11th response is dropped entirely
 )
 
 async with client_slave_pair(faults=plan) as (bus, mock):

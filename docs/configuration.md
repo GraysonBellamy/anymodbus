@@ -48,7 +48,7 @@ config = BusConfig(
     retries=RetryPolicy(
         retries=2,
         retry_on=frozenset({CRCError, FrameTimeoutError}),
-        retry_idempotent_only=False,    # opt into write retries
+        retry_idempotent_only=False,  # opt into write retries
         backoff_base=0.05,
     ),
 )
