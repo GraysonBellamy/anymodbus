@@ -217,10 +217,12 @@ Both timing knobs are configurable as floats or the sentinel `"auto"`. `"auto"` 
 
 **Broadcast turnaround delay.** After sending a broadcast (slave address 0; see §6.6) the master holds the bus idle for `timing.broadcast_turnaround` seconds before releasing the lock — distinct from `request_timeout` (which only applies to unicast since broadcasts have no response) and from t3.5 (which is wire-level). Default 0.100 s; spec recommends 100–200 ms (*serial §2.4.1*: "Typically the Response time-out is from 1s to several seconds at 9600 bps; and the Turnaround delay is from 100 ms to 200 ms").
 
+**Late-reply window.** A request that timed out or was cancelled was usually received by the slave, whose reply may still arrive; the input reset before the next request only removes bytes that have already arrived. A reply landing after the next request went out is framed as that request's reply — accepted silently if it has the same FC and length (an FC 03/04 reply carries no register address). `timing.late_reply_window` (default 0, opt-in) closes this: the bus classifies each attempt's outcome as *certain* (a reply that decoded and matched the request, or a checksum-valid Modbus exception response) or *uncertain* (everything else, once the request had started going out), and after an uncertain one it sends nothing until the window has passed since that attempt ended. Meanwhile it reads and discards whatever arrives, and it also waits for the line to have been silent for t3.5, so a reply straddling the end of the window is consumed whole; the discard is capped at `request_timeout`. Broadcasts open no window (no reply) but wait one out. `estimate_late_reply_window()` sizes it from the slave's turnaround, the baud rate, the largest reply, and adapter latency.
+
 ### 6.2 Tx: write & flush
 
 1. `await stream.send(adu_bytes)`.
-2. If the stream is a `SerialPort` and `BusConfig.drain_after_send=True` (default), `await port.drain()` to ensure the kernel has handed off bytes — important for RS-485 RTS-toggle correctness even when the kernel handles RTS, and nearly free otherwise.
+2. If the stream has an async `drain()` (an `anyserial.SerialPort` does; so can a wrapper that forwards it — `anymodbus.stream.SupportsDrain`) and `BusConfig.drain_after_send=True` (default), `await stream.drain()` to ensure the kernel has handed off bytes — important for RS-485 RTS-toggle correctness even when the kernel handles RTS, and nearly free otherwise. The input reset before each request is detected the same way (`SupportsResetInputBuffer`). Only *whether* the stream has the methods is cached; they are looked up on each use.
 
 ### 6.3 Rx: length-aware read state machine
 
@@ -241,24 +243,9 @@ _FIXED_TAIL: Final[Mapping[int, int]] = {
 
 # FCs whose response carries a 1-byte byte_count immediately after the FC byte.
 _BYTE_COUNT_1B: Final[frozenset[int]] = frozenset({0x01, 0x02, 0x03, 0x04, 0x17})
-
-# FCs known to the spec but not implemented by this version. Recognized so
-# the framer can fail with a precise error rather than mis-frame.
-_KNOWN_UNSUPPORTED: Final[frozenset[int]] = frozenset(
-    {
-        0x07,  # Read Exception Status (serial line only)
-        # 0x08 Diagnostics is NOT here since v0.2: sub-0 loopback is supported via
-        # a fixed 6-byte tail in _FIXED_TAIL.
-        0x0B,  # Get Comm Event Counter
-        0x0C,  # Get Comm Event Log
-        0x11,  # Report Server ID
-        0x14,  # Read File Record
-        0x15,  # Write File Record
-        0x18,  # Read FIFO Queue (note: 2-byte byte_count when implemented)
-        0x2B,  # Encapsulated Interface Transport (MEI 0x0E planned for v0.2)
-    }
-)
 ```
+
+Every other FC — vendor-private codes, and the spec FCs this client never sends (0x07, 0x0B, 0x0C, 0x11, 0x14, 0x15, 0x18, 0x2B) — goes to the gap-based reader, and the CRC decides (see below).
 
 State machine:
 
@@ -311,15 +298,10 @@ S0 (await response within deadline):
       payload = bc_byte + data_and_crc
   elif fc in _FIXED_TAIL:
       payload = await read_exact(stream, _FIXED_TAIL[fc], deadline)
-  elif fc in _KNOWN_UNSUPPORTED:
-      raise ModbusUnsupportedFunctionError(
-          f"FC 0x{fc:02x} is defined by the Modbus spec but not implemented "
-          f"by this version of anymodbus"
-      )
   else:
-      # Truly unknown FC (user-defined ranges 65-72, 100-110, or vendor
-      # private). Fall back to gap-based read; imprecise but the only
-      # option without per-FC length knowledge.
+      # Any other FC (user-defined ranges 65-72, 100-110, vendor private, or
+      # a spec FC this client never sends). Fall back to gap-based read;
+      # imprecise but the only option without per-FC length knowledge.
       payload = await read_until_idle(stream, gap=timing.inter_char_idle)
 
   verify_crc(buf + payload)
@@ -332,20 +314,20 @@ S0 (await response within deadline):
 - **Unexpected slave addresses do not abort.** Per *serial §2.4.1*, a reply addressed to a different slave keeps the response timeout running and the master continues to wait. This implementation drains the stray frame using a t1.5 idle gap and loops within the same deadline.
 - **PDU max sanity check.** A malformed slave that returns `byte_count = 0xFF` would otherwise induce a ~257-byte read — the explicit `bc > 250` guard surfaces that as `FrameError` immediately and avoids large speculative allocations.
 - **FC 0 is rejected** with `ProtocolError`, since *app §4.1* declares "Function code 0 is not valid".
-- **Known-but-unsupported FCs** (Diagnostics family, FIFO, file record, MEI transport) raise `ModbusUnsupportedFunctionError` instead of falling into the generic gap-based fallback. This stops a slave that supports more than we do from corrupting the stream just because we didn't know how to length-bound its response.
+- **Spec FCs the client never sends** (0x07, 0x0B, 0x0C, 0x11, 0x14, 0x15, 0x18, 0x2B) take the gap-based fallback like vendor-private FCs. No request this client can send is answered with one of them, so a reply that carries one is line damage (06 → 07, 03 → 0B, 04 → 0C, 10 → 11 are each one bit apart) or a confused slave. The gap read drains the rest of the frame and the CRC decides: damage raises `CRCError` (retryable), and a checksum-valid frame raises `UnexpectedResponseError` in the shared interpreter. Reporting these as `ModbusUnsupportedFunctionError` would tell the caller the device lacks the function — and, on a write, that the write was refused when it may have been applied.
 - **Exception responses are CRC-verified before raising.** A bad CRC on an exception ADU surfaces as `CRCError` (retryable per RetryPolicy), not as the slave-reported exception code (which we'd then have no business trusting).
 
-**Why length-aware reads:** they survive Linux/macOS scheduling jitter where response bytes arrive in 2–3 ms chunks. The 1.5-char gap fallback fires only for genuinely unknown FCs; standard FCs never exercise it. (`pymodbus`'s rx framer uses the same length-aware approach via per-PDU `calculateRtuFrameSize`.)
+**Why length-aware reads:** they survive Linux/macOS scheduling jitter where response bytes arrive in 2–3 ms chunks. The 1.5-char gap fallback fires only for FCs without a length entry; a well-formed reply to any request this client sends never exercises it. (`pymodbus`'s rx framer uses the same length-aware approach via per-PDU `calculateRtuFrameSize`.)
 
 `read_exact` is implemented over `stream.receive` with a buffered approach (bytearray accumulator, `receive_into` if the stream is an `anyserial.SerialPort` for zero-allocation reads).
 
 ### 6.4 CRC failure / resync
 
-On CRC mismatch:
+On CRC mismatch the framer raises `CRCError` straight away; the retry loop in `Bus._txn` decides whether to redrive the request. Resynchronisation happens before the next request, whatever caused the failure:
 
-1. `await stream.reset_input_buffer()` if the stream supports it (anyserial does).
-2. `await anyio.sleep(timing.inter_frame_idle)` — let the bus go idle for 3.5 char-times.
-3. Raise `ModbusCRCError`. The retry loop in `Bus._txn` decides whether to redrive the request.
+1. The inter-frame gap runs from the end of the failed attempt (the bus stamps the end of every attempt, however it ended).
+2. With `timing.late_reply_window > 0`, an uncertain outcome (timeout, cancellation, checksum or framing error, a reply that does not answer the request) holds the next request back for the window, while the bus reads and discards whatever arrives and waits for the line to be quiet for t3.5. This removes the rest of a damaged frame, and a late reply to the failed request, even on streams that cannot reset their input.
+3. `await stream.reset_input_buffer()` when the stream has it (an `anyserial.SerialPort` does) and `reset_input_buffer_before_request` is on.
 
 ### 6.5 Retry policy
 
@@ -353,7 +335,7 @@ On CRC mismatch:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RetryPolicy:
     retries: int = 1
-    retry_on: frozenset[type[ModbusError]] = frozenset({CRCError, FrameTimeoutError})
+    retry_on: frozenset[type[ModbusError]] = frozenset({ProtocolError, FrameTimeoutError})
     retry_idempotent_only: bool = True  # see is_idempotent_function
     backoff_base: float = 0.0  # extra wait beyond inter_frame_idle
 ```
@@ -400,7 +382,7 @@ Mirrors anyserial's multi-inheritance idiom. All inherit `ModbusError` plus a st
 | Class | Bases | Trigger |
 |---|---|---|
 | `ModbusError` | `Exception` | Base |
-| `ConfigurationError` | `ModbusError, ValueError` | Bad value passed to a config dataclass or constructor |
+| `ConfigurationError` | `ModbusError, ValueError` | Bad argument: a config value, a constructor argument, or a request/codec argument out of range; raised before anything is sent |
 | `ProtocolError` | `ModbusError, ValueError` | Codec/framer rejected something well-formed |
 | `ChecksumError` | `ProtocolError` | Frame complete but its trailing checksum failed (base of `CRCError`/`LRCError`) |
 | `CRCError` | `ChecksumError` | RTU CRC-16 mismatch |
@@ -408,11 +390,14 @@ Mirrors anyserial's multi-inheritance idiom. All inherit `ModbusError` plus a st
 | `FrameError` | `ProtocolError` | Truncated, junk between frames |
 | `FrameTimeoutError` | `ModbusError, TimeoutError` | No response within deadline |
 | `ConnectionLostError` | `ModbusError, anyio.BrokenResourceError` | Stream disconnected mid-txn |
+| `TransportError` | `ConnectionLostError, OSError` | Any other OS-level stream failure (e.g. an `anyserial.SerialError` for an unmapped errno, a failing `drain` / `reset_input_buffer`); errno kept, original as `__cause__` |
 | `BusClosedError` | `ModbusError, anyio.ClosedResourceError` | Bus closed |
-| `UnexpectedResponseError` | `ProtocolError` | Slave addr or FC echoed doesn't match request |
-| `ModbusUnsupportedFunctionError` | `ModbusError, NotImplementedError` | Caller asked for or framer received a known-but-not-implemented FC (see §6.3) |
+| `UnexpectedResponseError` | `ProtocolError` | Checksum-valid reply that doesn't answer the request: FC, register / coil count, or write echo (address, value, quantity) differs |
+| `ModbusUnsupportedFunctionError` | `ModbusError, NotImplementedError` | The client declines to send a known-but-not-implemented FC (send side only; a reply carrying one is `CRCError` or `UnexpectedResponseError`, see §6.3) |
 
-`ConfigurationError` is raised eagerly during `BusConfig`/`RetryPolicy`/`TimingConfig`/`Slave` construction; it never surfaces from a live transaction. Wire-level violations are `ProtocolError`. The two are deliberately distinct so callers can pre-validate their config without writing `try`/`except` around real I/O.
+`ConfigurationError` is raised for bad arguments — during `BusConfig`/`RetryPolicy`/`TimingConfig`/`Slave` construction, and by the codecs and request methods before anything is sent; it never reflects what came back from the wire. Wire-level violations are `ProtocolError`. The two are deliberately distinct so callers can pre-validate their config without writing `try`/`except` around real I/O, and both are `ValueError`s.
+
+Every failure of the stream reaches the caller as a `ModbusError`: `anyio.ClosedResourceError` becomes `BusClosedError`, `anyio.BrokenResourceError` (and an end of stream) `ConnectionLostError`, and any other `OSError` `TransportError`. The translation covers the whole attempt — the late-reply discard and the input reset as well as the send, drain and receive — and a `ModbusError` raised inside it (notably `FrameTimeoutError`, which is itself an `OSError`) passes through unchanged.
 
 Modbus *exception responses* (function code with high bit set, body = an exception code byte) map to dedicated subclasses, all inheriting `ModbusError` (not `ProtocolError` — they're a slave-side semantic outcome, not a wire error). The codes covered by *app §7* are:
 
@@ -509,7 +494,7 @@ def decode_read_holding_response(payload: bytes) -> tuple[int, ...]: ...
   | 0x10 Write Multiple Registers | 1 – 123 (0x7B) | app §6.12 |
   | 0x17 Read/Write Multiple Registers | read 1 – 125, write 1 – 121 (0x79) | app §6.17 |
 
-  Violations raise `ValueError`. Each `encode_*` enforces its own bounds; `decode_*` does not re-check (the framer has already accepted the byte_count).
+  Violations raise `ConfigurationError` (a `ValueError`). Each `encode_*` enforces its own bounds; `decode_*` does not re-check (the framer has already accepted the byte_count).
 
 - **FC 0x05 Write Single Coil — wire value.** Per *app §6.5*, the value field on the wire must be exactly `0xFF00` (ON) or `0x0000` (OFF); any other value is a protocol violation. The high-level API takes `on: bool` and the encoder produces the correct word. The decoder of the echo response asserts the value is one of these two — otherwise `ProtocolError`.
 
@@ -581,7 +566,7 @@ All four (word_order × byte_order) combinations are covered. Defaults are high-
 - `test_broadcast_no_rx_attempted` — with a `MockSlave` that records whether anything was read after the request, assert nothing is read after a broadcast.
 - `test_unexpected_slave_keeps_waiting` — `MockSlave` injects a stray frame addressed to a different slave, then the right one within the same response timeout; assert the right reply is returned and the deadline was not reset.
 - `test_unknown_exception_code_returns_unknown_class` — feed exception codes 0x07, 0x09, 0xFF and assert `ModbusUnknownExceptionError` with the raw code preserved.
-- `test_known_unsupported_fc_raises_precise_error` — feed a forged response with FC 0x07/0x08/0x18/etc. and assert `ModbusUnsupportedFunctionError`, *not* `FrameError` or stream corruption.
+- `TestUnsentSpecFunctionCodes` — a reply whose FC was damaged into one the client never sends (0x07, 0x0B, 0x0C, 0x11, ...) raises `CRCError` with the frame fully drained; a checksum-valid one raises `UnexpectedResponseError`.
 - `test_per_fc_quantity_bounds` — hypothesis-driven, one parametrize per FC, asserting both min-1 and max+1 raise.
 - `test_fc_05_wire_value_enforcement` — encoder produces 0xFF00/0x0000 only; decoder rejects any other value with `ProtocolError`.
 - `test_pdu_max_byte_count_sanity` — fuzz the rx framer with `byte_count` in `(251..255)` and assert `FrameError` with no large allocation.
@@ -598,15 +583,34 @@ class MockSlave:
     holding_registers: list[int]
     input_registers: list[int]
 
+    faults: FaultPlan
+    limits: QuantityLimits  # per-request quantity caps, spec maxima by default
+
+    def handle(self, request_pdu: bytes) -> bytes:
+        """Answer one request; the override point. Raise ServerException(code)."""
+
+    async def send_response(self, stream: anyio.abc.ByteStream, response_pdu: bytes) -> None:
+        """Send a reply as this slave, with the FaultPlan applied."""
+
     async def serve(self, stream: anyio.abc.ByteStream) -> None:
-        """Read requests, write responses, until cancelled."""
+        """Read requests, write responses, until cancelled (a one-slave MockServer)."""
 
 
-def client_slave_pair(*, slave_address: int = 1) -> tuple[Bus, MockSlave]:
+class MockServer:
+    """Several MockSlaves on one stream, routed by address."""
+
+    def __init__(self, *slaves: MockSlave, framing: Framing = Framing.RTU) -> None: ...
+    async def serve(self, stream: anyio.abc.ByteStream) -> None: ...
+
+
+def client_slave_pair(*, slave_address: int = 1, ...) -> tuple[Bus, MockSlave]:
     """Returns (bus, slave) pair backed by anyserial's serial_port_pair."""
+
+
+def client_server_pair(*slaves: MockSlave, ...) -> tuple[Bus, MockServer]: ...
 ```
 
-Expose enough surface that downstream device libraries can spin up a `MockSlave` preloaded with their device's register map and write protocol-level integration tests without hardware.
+Expose enough surface that downstream device libraries can spin up a `MockSlave` preloaded with their device's register map and write protocol-level integration tests without hardware — and, through `handle`, simulate their device's quirks without touching private internals. `MockServer` reads each request frame once (`Framer.read_request_adu`, framed by request length) and routes it, so several simulated slaves can share a line; an absent address is silent, a bad checksum is dropped, a broadcast is applied by all and answered by none. Its building blocks — the request decoders and response encoders in `anymodbus.pdu`, and `read_request_adu` — are public for custom servers.
 
 ## 13. Performance strategy
 
@@ -774,7 +778,7 @@ the bus is dead — open a new one. There is no auto-reconnect in v0.1
 
 - **Modbus ASCII serial framing** (`Framing.ASCII`, `open_modbus_ascii`, pure
   `anymodbus.lrc`). Realized via a narrow `Framer` strategy seam (`RtuFramer` /
-  `AsciiFramer` + a shared `interpret_response_pdu`) — the same seam the v0.3
+  `AsciiFramer` + a shared `interpret_response_pdu`) — the same seam the
   TCP/MBAP framer will slot into.
 - **FC 0x08 sub-0 diagnostic loopback** (`Slave.diagnostic_loopback`).
 - **FC04 input registers** in the typed reads (`source=RegisterSource.INPUT`).
@@ -796,7 +800,20 @@ the bus is dead — open a new one. There is no auto-reconnect in v0.1
 - Benchmarks vs pymodbus / minimalmodbus published in `docs/performance.md`.
 - More fault-injection scenarios.
 
-### v0.3 — Modbus TCP
+### v0.3 — Hardening for device libraries
+
+Driven by the device libraries built on `anymodbus` (`fujilib`, `servomexlib`, `watlowlib`), each replacing a workaround they carried:
+
+- Replies checked against the request inside each attempt (register count, write echo), retried and reported like any bad reply.
+- Opt-in `TimingConfig.late_reply_window` against late replies after a timeout or cancellation.
+- Transaction observers (`Bus.add_transaction_observer`) reporting each attempt's timing and outcome.
+- Every stream failure translated to a `ModbusError` (`TransportError` for OS-level errors).
+- Reply FCs the client never sends treated as line damage (`CRCError` / `UnexpectedResponseError`).
+- `ConfigurationError` for bad arguments everywhere.
+- Capability-based `drain` / `reset_input_buffer`, so wrapped ports keep them.
+- Server-side building blocks: request decoders, response encoders, `read_request_adu`, `MockServer`, `MockSlave.handle`, `ServerException`, `QuantityLimits`.
+
+### v0.4 — Modbus TCP
 
 - `anymodbus.tcp` adds `open_modbus_tcp(host, port)` returning a `Bus` over an `anyio.connect_tcp` stream.
 - MBAP framer (different framing — adds transaction ID, no CRC). Slots in as an alternative `Framer` strategy (`framer_tcp.py` + one line in `get_framer`, reusing `interpret_response_pdu`) without disturbing the `Bus` API — the seam was realized in v0.2.
@@ -808,7 +825,7 @@ Lock the public surface. Anything user-visible after this needs a deprecation cy
 ## 19. Open questions to flag
 
 1. **Default parity / baudrate.** **Resolved:** `open_modbus_rtu` requires both as keyword arguments with **no default**. Real-device defaults vary too widely (8N1 vs 8E1, 9600 vs 19200 vs 38400 ...) for any portable default to be safe. Force the user to make a deliberate choice. Note that *serial §2.5.1* makes 8E1 the spec default — when a downstream library has no better information, that's the recommendation to surface in docs.
-2. **Broadcast (slave_address=0).** **Resolved:** specified in §6.6. Broadcasts go through `Bus.broadcast_*` methods. `bus.slave(0)` raises `ConfigurationError`. The 3.5-char tx gap is held before the broadcast, and `timing.broadcast_turnaround` (default 100 ms per *serial §2.4.1*) is held after, before the bus lock is released. Only write FCs (5, 6, 15, 16) are valid; reads, mask write, and read/write multiple raise `ValueError` synchronously.
+2. **Broadcast (slave_address=0).** **Resolved:** specified in §6.6. Broadcasts go through `Bus.broadcast_*` methods. `bus.slave(0)` raises `ConfigurationError`. The 3.5-char tx gap is held before the broadcast, and `timing.broadcast_turnaround` (default 100 ms per *serial §2.4.1*) is held after, before the bus lock is released. Only write FCs (5, 6, 15, 16) are valid; reads, mask write, and read/write multiple raise `ConfigurationError` (a `ValueError`) synchronously.
 3. **Should `Bus` accept any `anyio.abc.ByteStreamConnectable` and own connect/reconnect?** **Open.** Lean: **no for v0.1**. Caller hands in an already-connected stream. Reconnection is a v0.2+ topic and likely belongs in a thin `ResilientBus` wrapper.
 4. **Inter-character timeout (1.5 char-times).** **Resolved:** specified in §6.1 as `TimingConfig.inter_char_idle`, used by both the unknown-FC gap-based reader (§6.3) and the unexpected-slave drain logic (§6.3). Default `max(1.5 * 11 / baudrate, 0.00075)` per *serial §2.5.1.1*.
 5. **Logging.** **Resolved:** use `logging` with a single named logger `anymodbus.bus`, log frame hex at DEBUG, exception responses and discarded stray frames at INFO, CRC/timeout at WARNING. Ruff's `LOG`/`G` rules already enforce extra-arg style.

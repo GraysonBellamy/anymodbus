@@ -8,7 +8,8 @@ using a length-aware state machine. It is the RTU implementation of the
 The state machine is the technical heart of the library. It uses a per-FC
 response-length table to read exactly the right number of bytes for known
 function codes, falling back to a t1.5-character idle-gap reader only for
-truly unknown function codes (vendor-private FCs in the user-defined ranges).
+function codes it has no length for (vendor-private FCs, and spec FCs this
+client never sends).
 This survives Linux/macOS scheduling jitter where response bytes arrive in
 2-3 ms chunks; gap-only readers do not.
 
@@ -31,9 +32,9 @@ import anyio.abc
 from anymodbus._types import FunctionCode
 from anymodbus.crc import crc16_modbus_bytes, verify_crc
 from anymodbus.exceptions import (
+    ConfigurationError,
     CRCError,
     FrameError,
-    ModbusUnsupportedFunctionError,
     ProtocolError,
 )
 
@@ -96,23 +97,34 @@ _BYTE_COUNT_1B: Final[frozenset[int]] = frozenset(
     }
 )
 
-# FCs defined by the spec but not implemented by this version. Recognised so
-# the framer raises a precise error instead of mis-framing a response on the
-# wire. Note FC 0x18 (Read FIFO Queue) actually carries a 2-byte byte_count
-# when implemented; that's a future-work consideration. FC 0x08 (Diagnostics)
-# is NOT here: sub-function 0x0000 is supported via the fixed 6-byte tail above.
-_KNOWN_UNSUPPORTED: Final[frozenset[int]] = frozenset(
-    {
-        0x07,  # Read Exception Status (serial line only)
-        0x0B,  # Get Comm Event Counter
-        0x0C,  # Get Comm Event Log
-        0x11,  # Report Server ID
-        0x14,  # Read File Record
-        0x15,  # Write File Record
-        0x18,  # Read FIFO Queue
-        FunctionCode.ENCAPSULATED_INTERFACE_TRANSPORT,  # 0x2B
-    }
-)
+# Per-FC *request* lengths, for servers reading requests. Bytes after the 2-byte
+# (slave + fc) header, INCLUDING the 2-byte trailing CRC. See *app §6.x*.
+_REQUEST_FIXED_TAIL: Final[Mapping[int, int]] = {
+    # FC 0x01-0x04: address(2) + quantity(2) + crc(2).
+    FunctionCode.READ_COILS: 6,
+    FunctionCode.READ_DISCRETE_INPUTS: 6,
+    FunctionCode.READ_HOLDING_REGISTERS: 6,
+    FunctionCode.READ_INPUT_REGISTERS: 6,
+    # FC 0x05 / 0x06: address(2) + value(2) + crc(2).
+    FunctionCode.WRITE_SINGLE_COIL: 6,
+    FunctionCode.WRITE_SINGLE_REGISTER: 6,
+    # FC 0x08: sub-function(2) + data(2) + crc(2), the shape of sub-function
+    # 0x0000 as this client sends it.
+    FunctionCode.DIAGNOSTICS: 6,
+    # FC 0x16: address(2) + and_mask(2) + or_mask(2) + crc(2).
+    FunctionCode.MASK_WRITE_REGISTER: 8,
+}
+
+# FCs whose request carries a 1-byte byte_count after a fixed prefix. The value
+# is the prefix length after the FC byte, excluding the byte_count itself; the
+# byte_count is followed by that many data bytes and the CRC.
+_REQUEST_BYTE_COUNT_PREFIX: Final[Mapping[int, int]] = {
+    # address(2) + quantity(2)
+    FunctionCode.WRITE_MULTIPLE_COILS: 4,
+    FunctionCode.WRITE_MULTIPLE_REGISTERS: 4,
+    # read address(2) + read quantity(2) + write address(2) + write quantity(2)
+    FunctionCode.READ_WRITE_MULTIPLE_REGISTERS: 8,
+}
 
 # *app §4.1*: the PDU is at most 253 bytes. A 1-byte-byte_count read response
 # is FC(1) + bc(1) + data(<=250) + crc(2) = 254 bytes on the wire after the
@@ -150,10 +162,10 @@ def encode_adu(*, slave_address: int, pdu: bytes) -> bytes:
     """
     if not (0 <= slave_address <= _MAX_ADDRESS_BYTE):
         msg = f"slave_address must be in [0, 0xFF] (got {slave_address!r})"
-        raise ValueError(msg)
+        raise ConfigurationError(msg)
     if len(pdu) == 0:
         msg = "pdu must not be empty"
-        raise ValueError(msg)
+        raise ConfigurationError(msg)
     head = bytes((slave_address,)) + pdu
     return head + crc16_modbus_bytes(head)
 
@@ -265,9 +277,9 @@ async def _read_raw_adu(
     The state machine implements *DESIGN.md §6.3*: read 2-byte header, drain
     stray frames (per *serial §2.4.1*), then dispatch on the **received** FC to
     one of the length-aware branches (exception / fixed tail / 1-byte
-    byte_count / known-unsupported / truly unknown). The received FC alone
-    determines the response length, so ``expected_function_code`` is not needed
-    here (decision D1).
+    byte_count) or, for any other FC, the t1.5 idle-gap reader. The received
+    FC alone determines the response length, so ``expected_function_code`` is
+    not needed here (decision D1).
 
     The caller is expected to wrap this in ``anyio.fail_after(request_timeout)``
     to bound the overall transaction; this function does not enforce a
@@ -278,9 +290,6 @@ async def _read_raw_adu(
             arrived) or a 1-byte byte_count exceeded the spec maximum.
         CRCError: Frame was complete but the trailing CRC did not verify.
         ProtocolError: Slave returned function code 0 (invalid per *app §4.1*).
-        ModbusUnsupportedFunctionError: Slave responded with a function code
-            that this version of ``anymodbus`` recognises but does not yet
-            length-frame.
     """
     while True:
         head = await _read_exact(stream, 2)
@@ -320,16 +329,15 @@ async def _read_raw_adu(
         tail = bc_byte + data_and_crc
     elif fc in _FIXED_TAIL:
         tail = await _read_exact(stream, _FIXED_TAIL[fc])
-    elif fc in _KNOWN_UNSUPPORTED:
-        msg = (
-            f"FC {fc:#04x} is defined by the Modbus spec but not implemented "
-            f"by this version of anymodbus"
-        )
-        raise ModbusUnsupportedFunctionError(msg)
     else:
-        # Truly unknown FC (user-defined ranges 65-72 / 100-110, vendor
-        # private). Fall back to the t1.5 gap-based reader; imprecise but the
-        # only option without per-FC length knowledge.
+        # Any other FC: vendor-private codes, and spec codes this client never
+        # sends (0x07, 0x0B, 0x0C, 0x11, 0x14, 0x15, 0x18, 0x2B, ...). A reply
+        # can only carry one of the latter through line damage (06 -> 07,
+        # 03 -> 0B, 10 -> 11 are one bit apart) or a confused slave. Read to
+        # the t1.5 idle gap, which also drains the rest of a damaged frame,
+        # and let the CRC decide: damage fails it (CRCError, retryable); a
+        # checksum-valid frame reaches interpret_response_pdu, which raises
+        # UnexpectedResponseError for the function-code mismatch.
         tail = await _read_until_idle(stream, gap=inter_char_idle)
         if len(tail) < _CRC_LEN:
             msg = (
@@ -351,6 +359,69 @@ async def _read_raw_adu(
     # Strip the trailing CRC from the tail; PDU is FC + body.
     pdu = bytes((fc,)) + tail[:-_CRC_LEN]
     return slave, pdu
+
+
+async def _drain_until_idle(stream: anyio.abc.ByteStream, *, gap: float) -> None:
+    """Discard bytes until ``gap`` seconds pass with none arriving (or the stream ends).
+
+    Unlike :func:`_read_until_idle`, the first read is bounded by ``gap`` too,
+    so a line that is already quiet returns at once.
+    """
+    while True:
+        with anyio.move_on_after(gap) as scope:
+            try:
+                await stream.receive(_MAX_TAIL_BYTES)
+            except anyio.EndOfStream:
+                return
+        if scope.cancelled_caught:
+            return
+
+
+async def _read_raw_request_adu(
+    stream: anyio.abc.ByteStream, *, inter_char_idle: float
+) -> tuple[int, bytes]:
+    """Read one **request** ADU, for any slave address; return ``(slave_address, pdu)``.
+
+    The server-side counterpart of :func:`_read_raw_adu`: frames by the
+    *request* length of the received FC, falling back to the t1.5 idle gap
+    for FCs without a length. Does not filter by address, so one reader can
+    serve several simulated slaves on one line.
+
+    Raises:
+        anyio.EndOfStream: The stream closed between frames.
+        FrameError: The frame was truncated or its byte_count is impossible.
+        CRCError: The frame was complete but its CRC did not verify. The rest
+            of the line is drained to the next t1.5 idle gap first, so the next
+            read starts at a frame boundary.
+    """
+    # A close before the first byte is a clean end between frames, and
+    # propagates as EndOfStream; after that, a close truncates the frame.
+    head = await stream.receive(2)
+    if len(head) < 2:  # noqa: PLR2004 — the 2-byte (slave + fc) header
+        head += await _read_exact(stream, 2 - len(head))
+    slave, fc = head[0], head[1]
+    if fc in _REQUEST_FIXED_TAIL:
+        tail = await _read_exact(stream, _REQUEST_FIXED_TAIL[fc])
+    elif fc in _REQUEST_BYTE_COUNT_PREFIX:
+        prefix = await _read_exact(stream, _REQUEST_BYTE_COUNT_PREFIX[fc] + 1)
+        byte_count = prefix[-1]
+        if byte_count > _MAX_BYTE_COUNT:
+            await _drain_until_idle(stream, gap=inter_char_idle)
+            msg = f"FC {fc:#04x} request: byte_count={byte_count} exceeds spec max"
+            raise FrameError(msg)
+        tail = prefix + await _read_exact(stream, byte_count + _CRC_LEN)
+    else:
+        tail = await _read_until_idle(stream, gap=inter_char_idle)
+        if len(tail) < _CRC_LEN:
+            msg = f"FC {fc:#04x} request truncated: only {len(tail)} byte(s) after the FC byte"
+            raise FrameError(msg)
+    if not verify_crc(head + tail):
+        await _drain_until_idle(stream, gap=inter_char_idle)
+        msg = f"CRC mismatch on FC {fc:#04x} request to slave 0x{slave:02x}"
+        raise CRCError(msg)
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        _LOGGER.debug("rx (request) %s", (head + tail).hex())
+    return slave, bytes((fc,)) + tail[:-_CRC_LEN]
 
 
 class RtuFramer:
@@ -381,6 +452,18 @@ class RtuFramer:
             inter_char_idle=inter_char_idle,
         )
 
+    async def read_request_adu(
+        self,
+        stream: anyio.abc.ByteStream,
+        *,
+        inter_char_idle: float,
+    ) -> tuple[int, bytes]:
+        """Read one request frame for any slave address; return ``(slave, pdu)``.
+
+        See :func:`_read_raw_request_adu`. For servers and test slaves.
+        """
+        return await _read_raw_request_adu(stream, inter_char_idle=inter_char_idle)
+
 
 #: Shared stateless RTU framer singleton (returned by ``framing.get_framer``).
 RTU_FRAMER: Final[RtuFramer] = RtuFramer()
@@ -400,10 +483,9 @@ async def read_response_adu(
     in :class:`anymodbus.Bus` uses those two directly; this preserves the
     0.1.x signature and behaviour for existing callers and tests.
 
-    Returns ``(slave_address, pdu)`` for a normal, matching response; raises the
-    same exceptions the 0.1.x reader did (CRCError, ProtocolError,
-    UnexpectedResponseError, ModbusUnsupportedFunctionError, and the
-    ModbusExceptionResponse subclasses).
+    Returns ``(slave_address, pdu)`` for a normal, matching response; raises
+    CRCError, FrameError, ProtocolError, UnexpectedResponseError, or a
+    ModbusExceptionResponse subclass.
     """
     slave, pdu = await RTU_FRAMER.read_adu(
         stream,

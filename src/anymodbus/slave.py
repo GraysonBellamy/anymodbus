@@ -2,11 +2,15 @@
 
 A :class:`Slave` is cheap — it holds a reference to the bus and an
 ``int`` address, nothing else. Methods build the request PDU via
-:mod:`anymodbus.pdu`, hand it to ``Bus._txn``, and decode the response.
+:mod:`anymodbus.pdu` and hand it to ``Bus._txn`` together with the function
+that decodes the response and checks it against the request. The bus runs
+that check inside each attempt, so a reply that does not answer the request
+is retried and reported like any other bad reply.
 """
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 from anymodbus._types import ByteOrder, Capability, FunctionCode, RegisterSource, WordOrder
@@ -86,6 +90,28 @@ _PROBE_NON_PROBED_FUNCTION_CODES: tuple[FunctionCode, ...] = (
 _PROBE_ADDRESS_WALK: tuple[int, ...] = (0x0000, 0x0001, 0x0040, 0x0100, 0x1000)
 
 
+def _check_write_echo(
+    fc: FunctionCode,
+    echoed: tuple[int, int],
+    requested: tuple[int, int],
+    *,
+    field: str,
+) -> None:
+    """Raise if a write response's echoed ``(address, field)`` differs from the request's.
+
+    *app §6.5, §6.6, §6.11, §6.12*: the normal response to a write echoes the
+    request's address and its value (FC 0x05 / 0x06) or quantity (FC 0x0F /
+    0x10).
+    """
+    if echoed != requested:
+        msg = (
+            f"FC {fc:#04x} response echoes address={echoed[0]} {field}={echoed[1]!r}, "
+            f"but the request was address={requested[0]} {field}={requested[1]!r}; "
+            f"the slave did answer, so the write may have been applied"
+        )
+        raise UnexpectedResponseError(msg)
+
+
 class Slave:
     """A handle for talking to one Modbus slave on a :class:`Bus`.
 
@@ -135,87 +161,122 @@ class Slave:
     async def read_coils(self, address: int, *, count: int) -> tuple[bool, ...]:
         """FC 0x01 — Read ``count`` coils starting at ``address``."""
         pdu = encode_read_coils_request(address, count)
-        response_pdu = await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
+        return await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
             slave_address=self.address,
             request_pdu=pdu,
             expected_function_code=FunctionCode.READ_COILS,
+            decode=partial(decode_read_coils_response, expected_count=count),
         )
-        return decode_read_coils_response(response_pdu, expected_count=count)
 
     async def read_discrete_inputs(self, address: int, *, count: int) -> tuple[bool, ...]:
         """FC 0x02 — Read ``count`` discrete inputs starting at ``address``."""
         pdu = encode_read_discrete_inputs_request(address, count)
-        response_pdu = await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
+        return await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
             slave_address=self.address,
             request_pdu=pdu,
             expected_function_code=FunctionCode.READ_DISCRETE_INPUTS,
+            decode=partial(decode_read_discrete_inputs_response, expected_count=count),
         )
-        return decode_read_discrete_inputs_response(response_pdu, expected_count=count)
 
     async def read_holding_registers(self, address: int, *, count: int) -> tuple[int, ...]:
-        """FC 0x03 — Read ``count`` holding registers starting at ``address``."""
+        """FC 0x03 — Read ``count`` holding registers starting at ``address``.
+
+        A reply carrying a different number of registers raises
+        :class:`UnexpectedResponseError` (retried under the default policy).
+        """
         pdu = encode_read_holding_registers_request(address, count)
-        response_pdu = await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
+        return await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
             slave_address=self.address,
             request_pdu=pdu,
             expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
+            decode=partial(decode_read_holding_registers_response, expected_count=count),
         )
-        return decode_read_holding_registers_response(response_pdu)
 
     async def read_input_registers(self, address: int, *, count: int) -> tuple[int, ...]:
-        """FC 0x04 — Read ``count`` input registers starting at ``address``."""
+        """FC 0x04 — Read ``count`` input registers starting at ``address``.
+
+        A reply carrying a different number of registers raises
+        :class:`UnexpectedResponseError` (retried under the default policy).
+        """
         pdu = encode_read_input_registers_request(address, count)
-        response_pdu = await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
+        return await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
             slave_address=self.address,
             request_pdu=pdu,
             expected_function_code=FunctionCode.READ_INPUT_REGISTERS,
+            decode=partial(decode_read_input_registers_response, expected_count=count),
         )
-        return decode_read_input_registers_response(response_pdu)
 
     # ------------------------------------------------------------------
-    # Standard write function codes
+    # Standard write function codes. Each verifies the slave's echo of the
+    # address and value / quantity; a mismatch raises UnexpectedResponseError.
     # ------------------------------------------------------------------
 
     async def write_coil(self, address: int, *, on: bool) -> None:
         """FC 0x05 — Write a single coil. The slave's echo is verified."""
         pdu = encode_write_single_coil_request(address, on=on)
-        response_pdu = await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
+
+        def check_echo(response_pdu: bytes) -> None:
+            # Also validates the wire value is 0xFF00/0x0000 per *app §6.5*.
+            echoed = decode_write_single_coil_response(response_pdu)
+            _check_write_echo(FunctionCode.WRITE_SINGLE_COIL, echoed, (address, on), field="on")
+
+        await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
             slave_address=self.address,
             request_pdu=pdu,
             expected_function_code=FunctionCode.WRITE_SINGLE_COIL,
+            decode=check_echo,
         )
-        # Validates the wire value is 0xFF00/0x0000 per *app §6.5*.
-        decode_write_single_coil_response(response_pdu)
 
     async def write_register(self, address: int, value: int) -> None:
-        """FC 0x06 — Write a single holding register."""
+        """FC 0x06 — Write a single holding register. The slave's echo is verified."""
         pdu = encode_write_single_register_request(address, value)
-        response_pdu = await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
+
+        def check_echo(response_pdu: bytes) -> None:
+            echoed = decode_write_single_register_response(response_pdu)
+            _check_write_echo(
+                FunctionCode.WRITE_SINGLE_REGISTER, echoed, (address, value), field="value"
+            )
+
+        await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
             slave_address=self.address,
             request_pdu=pdu,
             expected_function_code=FunctionCode.WRITE_SINGLE_REGISTER,
+            decode=check_echo,
         )
-        decode_write_single_register_response(response_pdu)
 
     async def write_coils(self, address: int, values: Sequence[bool]) -> None:
-        """FC 0x0F — Write multiple coils."""
+        """FC 0x0F — Write multiple coils. The slave's echo is verified."""
         pdu = encode_write_multiple_coils_request(address, values)
-        response_pdu = await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
+        requested = (address, len(values))
+
+        def check_echo(response_pdu: bytes) -> None:
+            echoed = decode_write_multiple_coils_response(response_pdu)
+            _check_write_echo(FunctionCode.WRITE_MULTIPLE_COILS, echoed, requested, field="count")
+
+        await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
             slave_address=self.address,
             request_pdu=pdu,
             expected_function_code=FunctionCode.WRITE_MULTIPLE_COILS,
+            decode=check_echo,
         )
-        decode_write_multiple_coils_response(response_pdu)
 
     async def write_registers(self, address: int, values: Sequence[int]) -> None:
-        """FC 0x10 — Write multiple holding registers."""
+        """FC 0x10 — Write multiple holding registers. The slave's echo is verified."""
         pdu = encode_write_multiple_registers_request(address, values)
-        response_pdu = await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
+        requested = (address, len(values))
+
+        def check_echo(response_pdu: bytes) -> None:
+            echoed = decode_write_multiple_registers_response(response_pdu)
+            _check_write_echo(
+                FunctionCode.WRITE_MULTIPLE_REGISTERS, echoed, requested, field="count"
+            )
+
+        await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
             slave_address=self.address,
             request_pdu=pdu,
             expected_function_code=FunctionCode.WRITE_MULTIPLE_REGISTERS,
+            decode=check_echo,
         )
-        decode_write_multiple_registers_response(response_pdu)
 
     # ------------------------------------------------------------------
     # Higher-level helpers — float / int32 / string with explicit ordering.
@@ -369,21 +430,25 @@ class Slave:
         transport errors like the read FCs).
 
         Raises:
-            ValueError: ``data`` is not exactly 2 bytes.
+            ConfigurationError: ``data`` is not exactly 2 bytes.
             UnexpectedResponseError: the echoed data does not match what was
                 sent.
         """
         pdu = encode_diagnostic_loopback_request(data)
-        response_pdu = await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
+
+        def check_echo(response_pdu: bytes) -> bytes:
+            echoed = decode_diagnostic_loopback_response(response_pdu)
+            if echoed != data:
+                msg = f"loopback echo {echoed!r} does not match sent data {data!r}"
+                raise UnexpectedResponseError(msg)
+            return echoed
+
+        return await self._bus._txn(  # pyright: ignore[reportPrivateUsage]
             slave_address=self.address,
             request_pdu=pdu,
             expected_function_code=FunctionCode.DIAGNOSTICS,
+            decode=check_echo,
         )
-        echoed = decode_diagnostic_loopback_response(response_pdu)
-        if echoed != data:
-            msg = f"loopback echo {echoed!r} does not match sent data {data!r}"
-            raise UnexpectedResponseError(msg)
-        return echoed
 
     # ------------------------------------------------------------------
     # Capability probing

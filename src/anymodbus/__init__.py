@@ -21,7 +21,12 @@ from anymodbus._types import (
 from anymodbus._version import __version__
 from anymodbus.bus import Bus
 from anymodbus.capabilities import SlaveCapabilities
-from anymodbus.config import BusConfig, RetryPolicy, TimingConfig
+from anymodbus.config import (
+    BusConfig,
+    RetryPolicy,
+    TimingConfig,
+    estimate_late_reply_window,
+)
 from anymodbus.decoders import decode, encode, register_count_for
 from anymodbus.exceptions import (
     AcknowledgeError,
@@ -46,10 +51,12 @@ from anymodbus.exceptions import (
     ProtocolError,
     SlaveDeviceBusyError,
     SlaveDeviceFailureError,
+    TransportError,
     UnexpectedResponseError,
 )
 from anymodbus.slave import Slave
 from anymodbus.stream import open_modbus_ascii, open_modbus_rtu
+from anymodbus.transaction import TransactionInfo, TransactionObserver, TransactionOutcome
 
 #: Short alias for :class:`FunctionCode`. The class docstring promised it; we
 #: deliver. Use ``anymodbus.FC.READ_HOLDING_REGISTERS`` if the long name is
@@ -93,11 +100,16 @@ __all__ = [
     "SlaveDeviceBusyError",
     "SlaveDeviceFailureError",
     "TimingConfig",
+    "TransactionInfo",
+    "TransactionObserver",
+    "TransactionOutcome",
+    "TransportError",
     "UnexpectedResponseError",
     "WordOrder",
     "__version__",
     "decode",
     "encode",
+    "estimate_late_reply_window",
     "is_idempotent_function",
     "is_read_function",
     "is_write_function",

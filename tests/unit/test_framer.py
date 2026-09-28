@@ -30,7 +30,6 @@ from anymodbus.exceptions import (
     IllegalDataAddressError,
     IllegalFunctionError,
     ModbusUnknownExceptionError,
-    ModbusUnsupportedFunctionError,
     ProtocolError,
     SlaveDeviceFailureError,
     UnexpectedResponseError,
@@ -398,52 +397,82 @@ class TestProtocolValidation:
 
 
 # ---------------------------------------------------------------------------
-# Known-but-unsupported FCs — the precise-error branch.
+# Spec FCs this client never sends — line damage or a confused slave.
 # ---------------------------------------------------------------------------
 
+# Spec function codes this client has no request for, so no length table.
+_UNSENT_SPEC_FCS = [
+    0x07,  # Read Exception Status
+    0x0B,  # Get Comm Event Counter
+    0x0C,  # Get Comm Event Log
+    0x11,  # Report Server ID
+    0x14,  # Read File Record
+    0x15,  # Write File Record
+    0x18,  # Read FIFO Queue
+    0x2B,  # Encapsulated Interface Transport
+]
 
-class TestKnownUnsupportedFunctionCodes:
-    """Recognise spec FCs we haven't implemented and fail loudly."""
+
+class TestUnsentSpecFunctionCodes:
+    """A reply carrying a spec FC we never send is framed by gap and judged by CRC."""
 
     @pytest.mark.parametrize(
-        "fc",
+        ("sent_pdu", "damaged_fc"),
         [
-            0x07,  # Read Exception Status
-            0x0B,  # Get Comm Event Counter
-            0x0C,  # Get Comm Event Log
-            0x11,  # Report Server ID
-            0x14,  # Read File Record
-            0x15,  # Write File Record
-            0x18,  # Read FIFO Queue
-            0x2B,  # Encapsulated Interface Transport
+            pytest.param(bytes([0x06, 0x00, 0x01, 0x00, 0x03]), 0x07, id="06-to-07"),
+            pytest.param(bytes([0x03, 0x02, 0x12, 0x34]), 0x0B, id="03-to-0B"),
+            pytest.param(bytes([0x04, 0x02, 0x12, 0x34]), 0x0C, id="04-to-0C"),
+            pytest.param(bytes([0x10, 0x00, 0x01, 0x00, 0x02]), 0x11, id="10-to-11"),
+            pytest.param(bytes([0x10, 0x00, 0x01, 0x00, 0x02]), 0x14, id="10-to-14"),
+            pytest.param(bytes([0x10, 0x00, 0x01, 0x00, 0x02]), 0x18, id="10-to-18"),
         ],
     )
-    async def test_known_unsupported_fc_raises_precise_error(self, fc: int) -> None:
-        # Reachable only when the caller has expected an unsupported FC — i.e.,
-        # a future FC was added to the enum but its read branch wasn't (or the
-        # caller cast a raw int through). The realistic v0.1 case is FC 0x2B
-        # (in the enum, no read branch yet); the others are defensive
-        # future-proofing. We use a cast for all of them so the test pins the
-        # branch regardless of which FCs end up in the enum.
-        #
-        # The point of this branch — versus letting it fall into the
-        # gap-based fallback — is that the gap fallback could mis-frame the
-        # next response on the wire. The precise error stops the bus cleanly.
-        forged = bytes([0x01, fc])
-        with pytest.raises(ModbusUnsupportedFunctionError, match=f"{fc:#04x}"):
+    async def test_damaged_function_code_is_a_crc_error(
+        self, sent_pdu: bytes, damaged_fc: int
+    ) -> None:
+        # A bit error turns a reply's FC into one of these codes. The rest of
+        # the damaged frame is drained by the idle-gap reader and the CRC
+        # (computed over the undamaged FC) fails: a retryable CRCError, not a
+        # claim that the slave lacks the function.
+        good = _adu(0x01, sent_pdu)
+        damaged = good[:1] + bytes((damaged_fc,)) + good[2:]
+        expected_fc = FunctionCode(sent_pdu[0])
+        stream = _stream(damaged, _INTER_CHAR_GAP_S * 4, _adu(0x01, sent_pdu))
+        with pytest.raises(CRCError):
             await read_response_adu(
-                _stream(forged),
+                stream,
                 expected_slave_address=0x01,
-                expected_function_code=cast("FunctionCode", fc),
+                expected_function_code=expected_fc,
+                inter_char_idle=_INTER_CHAR_GAP_S,
+            )
+        # The whole damaged frame was consumed: the next read gets the next frame.
+        slave, pdu = await read_response_adu(
+            stream,
+            expected_slave_address=0x01,
+            expected_function_code=expected_fc,
+            inter_char_idle=_INTER_CHAR_GAP_S,
+        )
+        assert (slave, pdu) == (0x01, sent_pdu)
+
+    @pytest.mark.parametrize("fc", _UNSENT_SPEC_FCS)
+    async def test_checksum_valid_reply_is_unexpected_response(self, fc: int) -> None:
+        # A checksum-valid frame with one of these FCs is a reply that does not
+        # answer the request: UnexpectedResponseError, like any FC mismatch.
+        forged = _adu(0x01, bytes([fc, 0x00, 0x00]))
+        with pytest.raises(UnexpectedResponseError, match=f"fc {fc:#04x}"):
+            await read_response_adu(
+                _stream(forged, hold_open=True),
+                expected_slave_address=0x01,
+                expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
                 inter_char_idle=_INTER_CHAR_GAP_S,
             )
 
     async def test_supported_but_mismatched_fc_raises_unexpected(self) -> None:
         # Realistic-but-rare bug case: we sent FC 3, slave returns a complete,
-        # valid FC 0x08 (Diagnostics sub-0) frame by mistake. FC08 is now
-        # framable (fixed 6-byte tail), so the framer reads the whole frame and
-        # the shared interpreter (D1) raises UnexpectedResponseError on the
-        # fc mismatch (0x08 != 0x03) — not ModbusUnsupportedFunctionError.
+        # valid FC 0x08 (Diagnostics sub-0) frame by mistake. FC08 is framable
+        # (fixed 6-byte tail), so the framer reads the whole frame and the
+        # shared interpreter (D1) raises UnexpectedResponseError on the fc
+        # mismatch (0x08 != 0x03).
         forged = _adu(0x01, bytes([0x08, 0x00, 0x00, 0xAB, 0xCD]))
         with pytest.raises(UnexpectedResponseError, match="fc 0x08"):
             await read_response_adu(

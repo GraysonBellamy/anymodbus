@@ -46,13 +46,11 @@ FCs 0x01, 0x02, 0x03, 0x04, 0x17 carry a 1-byte byte_count immediately after the
 
 A `byte_count` > 250 raises `FrameError` immediately. *app §4.1* caps the PDU at 253 bytes; a malformed slave returning `0xFF` would otherwise force a ~257-byte speculative read.
 
-### 3. Known-but-unsupported FCs (`_KNOWN_UNSUPPORTED`)
+### 3. Any other FC (gap-based fallback)
 
-FCs 0x07, 0x0B, 0x0C, 0x11, 0x14, 0x15, 0x18, 0x2B are defined by the spec but not implemented. The framer recognises them and raises `ModbusUnsupportedFunctionError` rather than letting them corrupt the stream by falling into the gap-based fallback. (FC 0x08 was in this set before v0.2; sub-0 loopback is now supported via a fixed 6-byte tail.)
+For any FC not in the tables above, the only option is the t1.5-character idle-gap reader. That covers vendor-private FCs (user-defined ranges 65–72, 100–110) and the spec FCs this client never sends (0x07, 0x0B, 0x0C, 0x11, 0x14, 0x15, 0x18, 0x2B). A reply can only carry one of the latter through line damage — 06 → 07, 03 → 0B, 04 → 0C, 10 → 11 are each one bit apart — or a confused slave. The gap read drains the rest of the frame and the CRC decides: a damaged frame fails it (`CRCError`, retryable), and a checksum-valid one reaches the shared interpreter, which raises `UnexpectedResponseError` for the function-code mismatch.
 
-### 4. Truly unknown FCs (gap-based fallback)
-
-For vendor-private FCs (user-defined ranges 65–72, 100–110, or anything else not in the above tables), the only option is the t1.5-character idle-gap reader. This is the **only** path that depends on rx timing, and it's the only path that can mis-frame under userspace scheduler jitter — but it never fires for any standard FC.
+This is the **only** path that depends on rx timing, and it's the only path that can mis-frame under userspace scheduler jitter — but it never fires for a well-formed reply to any request this client sends. If jitter does split a frame, the CRC fails and the leftover bytes are flushed before the next request.
 
 ## Exception responses
 
@@ -96,4 +94,4 @@ The framer state machine has 100% branch coverage in [tests/unit/test_framer.py]
 - Stray slave address followed by valid frame → discards stray, returns valid.
 - Bad CRC on exception response → `CRCError`, not the slave's exception.
 - FC 0 → `ProtocolError`.
-- Each `_KNOWN_UNSUPPORTED` FC → `ModbusUnsupportedFunctionError`.
+- A reply FC the client never sends: damaged → `CRCError` with the frame fully drained; checksum-valid → `UnexpectedResponseError`.

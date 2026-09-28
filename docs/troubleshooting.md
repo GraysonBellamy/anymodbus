@@ -27,20 +27,26 @@ The slave received the frame fine but rejected the request semantically.
 
 ## `UnexpectedResponseError`
 
-The slave echoed a different address or function code than we requested. Usually means one of:
+The reply has a checksum that verifies but doesn't answer the request: a different function code, a different number of registers or coils than you asked for, or a write echo whose address, value or quantity differs from what you sent. On a write, the slave did answer, so the write may have been applied. Usually means one of:
+
+- **A late reply to an earlier request.** A request that timed out or was cancelled can still be answered; the reply then lands during the next transaction. Set `TimingConfig.late_reply_window` (see [late replies](cancellation.md#late-replies)) — and consider a longer `request_timeout` if your device is simply slow.
 
 - **Hardware echo on a USB-RS485 adapter.** Some cheap adapters loop your transmitted bytes back into the receive line, so `anymodbus` reads its own request and tries to parse it as a response. Symptoms: the "wrong" address/FC is exactly what you just sent. Fix at the `anyserial` layer — see `anyserial`'s `RS485Config` (`rts_on_send` / kernel `TIOCSRS485`) or, for adapters that ignore RTS, the manual `set_control_lines` + `drain_exact` pattern. The protocol layer can't recover from this; it must be solved one layer down.
 - Another master is on the bus.
 - The slave is misbehaving (firmware bug).
 - A previous transaction left junk in the rx buffer (`reset_input_buffer_before_request=True` in `BusConfig` is the default — don't disable it without reason).
 
+## `TransportError` / `ConnectionLostError`
+
+The port itself failed: the device was unplugged, the driver returned an error, or `drain` / `reset_input_buffer` failed. `ConnectionLostError` is a disconnect; `TransportError` (a subclass, and also an `OSError`) is any other OS-level error, with the original exception as `__cause__`. Neither is retried. Treat the port as gone: close the bus and open a new one.
+
 ## `ConfigurationError`
 
-Raised at construction time, never on the wire. Common triggers:
+Raised before anything is sent, never because of what came back. Common triggers:
 
 - `BusConfig(request_timeout=...)` with a value <= 0 or > 60 seconds.
-- `Slave(bus, address=...)` with an address outside [0, 255].
-- Calling a unicast method (`read_holding_registers`, `write_register`, …) on a broadcast handle (`address=0`). Use `Bus.broadcast_*` for broadcasts.
+- `bus.slave(address)` with an address outside 1-247 — including 0, the broadcast address. Use `Bus.broadcast_*` for broadcasts.
+- A register count above the spec maximum (125 for FC 03/04) or a value that doesn't fit in a 16-bit register.
 
 ## Floats look wrong
 

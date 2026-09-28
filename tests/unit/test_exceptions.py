@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+
 import anyio
 import pytest
 
@@ -27,6 +29,8 @@ from anymodbus.exceptions import (
     ProtocolError,
     SlaveDeviceBusyError,
     SlaveDeviceFailureError,
+    TransportError,
+    UnexpectedResponseError,
     code_to_exception,
     is_exception_response,
     strip_exception_bit,
@@ -68,6 +72,20 @@ class TestMultiInheritance:
     def test_bus_closed_is_anyio_closed(self) -> None:
         with pytest.raises(anyio.ClosedResourceError):
             raise BusClosedError("closed")
+
+    def test_transport_error_is_connection_lost_and_os_error(self) -> None:
+        assert issubclass(TransportError, ConnectionLostError)
+        assert issubclass(TransportError, anyio.BrokenResourceError)
+        assert issubclass(TransportError, OSError)
+        err = TransportError(errno.EIO, "port failed")
+        assert err.errno == errno.EIO
+        assert "port failed" in str(err)
+        with pytest.raises(OSError):
+            raise err
+
+    def test_unexpected_response_is_protocol_error(self) -> None:
+        with pytest.raises(ProtocolError):
+            raise UnexpectedResponseError("reply to another request")
 
     def test_configuration_error_is_value_error(self) -> None:
         with pytest.raises(ValueError):

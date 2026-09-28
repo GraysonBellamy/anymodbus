@@ -22,7 +22,7 @@ For TCP, ASCII, server-side support, or a battle-tested option, use `pymodbus`. 
 
 - A Modbus server.
 - A Modbus ASCII implementation.
-- A Modbus TCP implementation (planned for v0.3).
+- A Modbus TCP implementation (planned for v0.4).
 - A device driver. Vendor-specific register maps and quirks belong in downstream packages layered on top.
 
 ## Where to start

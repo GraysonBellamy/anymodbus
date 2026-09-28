@@ -22,6 +22,7 @@ nav = [
         { Decoders = "decoders.md" },
         { Capabilities = "capabilities.md" },
         { Cancellation = "cancellation.md" },
+        { "Transaction observers" = "observers.md" },
         { "Sync wrapper" = "sync.md" },
     ] },
     { Reliability = [

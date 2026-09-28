@@ -13,15 +13,19 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Self
 
 from anymodbus.exceptions import (
-    ChecksumError,
     ConfigurationError,
     FrameTimeoutError,
     ModbusError,
+    ProtocolError,
 )
 
 _DEFAULT_REQUEST_TIMEOUT = 3.0
 _DEFAULT_BROADCAST_TURNAROUND = 0.1  # 100 ms — Serial Line spec §2.4.1 minimum
 _MAX_REQUEST_TIMEOUT = 60.0
+
+# On-wire bits per character: 1 start + 8 data + (parity OR extra stop) + 1 stop.
+# The same 11 the bus uses for its t3.5 / t1.5 gaps.
+_BITS_PER_CHARACTER = 11
 
 #: Sentinel for "compute from baud" timing fields. The string value lets
 #: existing equality checks (``cfg.timing.inter_frame_idle == "auto"``) keep
@@ -53,6 +57,21 @@ class TimingConfig:
             warm-up so the first frame isn't dropped on a freshly-opened link.
             Unlike ``inter_frame_idle`` (applied before every frame), this is
             applied exactly once. Default 0 (disabled).
+        late_reply_window: How long, in seconds, a reply may still arrive
+            after an attempt whose outcome is uncertain: a timeout, a
+            cancellation, a checksum or framing error, or a reply that does
+            not answer the request. After such an attempt the bus sends
+            nothing until this long after it ended; until then it reads and
+            discards whatever arrives, and it also waits for the line to have
+            been silent for ``inter_frame_idle``. Without it, a late reply can
+            be taken as the answer to the next request: one with the same
+            function code and length is accepted silently. A normal reply or
+            a Modbus exception response opens no window, and neither does an
+            attempt cancelled before its request was sent. Size it with
+            :func:`estimate_late_reply_window`. Default 0 (disabled). Leave it
+            at 0 on a port shared with another reader
+            (``reset_input_buffer_before_request=False``): the discard would
+            consume that reader's bytes.
     """
 
     inter_frame_idle: float | AutoTiming = "auto"
@@ -60,6 +79,7 @@ class TimingConfig:
     post_tx_settle: float = 0.0
     broadcast_turnaround: float = _DEFAULT_BROADCAST_TURNAROUND
     startup_settle: float = 0.0
+    late_reply_window: float = 0.0
 
     def __post_init__(self) -> None:
         """Validate numeric timings."""
@@ -77,12 +97,57 @@ class TimingConfig:
             )
         if self.startup_settle < 0:
             raise ConfigurationError(f"startup_settle must be >= 0 (got {self.startup_settle!r})")
+        if self.late_reply_window < 0:
+            raise ConfigurationError(
+                f"late_reply_window must be >= 0 (got {self.late_reply_window!r})"
+            )
 
 
-# ``ChecksumError`` (not ``CRCError``) so both RTU CRC-16 and ASCII LRC
-# failures retry by default. ``CRCError`` ⊂ ``ChecksumError``, so RTU behaviour
-# is unchanged; the ``_should_retry`` path uses ``isinstance``, not membership.
-_DEFAULT_RETRY_ON: frozenset[type[ModbusError]] = frozenset({ChecksumError, FrameTimeoutError})
+def estimate_late_reply_window(
+    *,
+    baudrate: int,
+    max_turnaround: float,
+    max_reply_bytes: int = 256,
+    latency: float = 0.0,
+) -> float:
+    """Return a :attr:`TimingConfig.late_reply_window` that covers a slave's slowest reply.
+
+    The window is measured from the end of the uncertain attempt, which is
+    never earlier than when its request was sent, so it only has to cover the
+    time from sending a request to the end of its reply: the slave's longest
+    turnaround, the time to transmit the longest reply at ``baudrate``
+    (11 bits per character), and any fixed latency in the adapter.
+
+    Args:
+        baudrate: Line speed in bits per second.
+        max_turnaround: The slave's longest delay, in seconds, between
+            receiving a request and starting its reply (from the device
+            manual, or measured).
+        max_reply_bytes: The longest reply, in characters on the wire.
+            Default 256, the largest RTU ADU. For Modbus ASCII count two
+            characters per byte plus five.
+        latency: Fixed delay added by the adapter, in seconds, e.g. a USB
+            serial adapter's latency timer (typically 1-16 ms).
+
+    Raises:
+        ConfigurationError: An argument is out of range.
+    """
+    if baudrate <= 0:
+        raise ConfigurationError(f"baudrate must be > 0 (got {baudrate!r})")
+    if max_turnaround < 0:
+        raise ConfigurationError(f"max_turnaround must be >= 0 (got {max_turnaround!r})")
+    if max_reply_bytes < 1:
+        raise ConfigurationError(f"max_reply_bytes must be >= 1 (got {max_reply_bytes!r})")
+    if latency < 0:
+        raise ConfigurationError(f"latency must be >= 0 (got {latency!r})")
+    return max_turnaround + max_reply_bytes * _BITS_PER_CHARACTER / baudrate + latency
+
+
+# Every ``ProtocolError`` (a checksum failure, a malformed or truncated frame, a
+# reply that does not answer the request) plus a timeout. On a read these are
+# transit faults and retrying is safe; ``retry_idempotent_only`` keeps writes
+# out. The ``_should_retry`` path uses ``isinstance``, not membership.
+_DEFAULT_RETRY_ON: frozenset[type[ModbusError]] = frozenset({ProtocolError, FrameTimeoutError})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -94,9 +159,12 @@ class RetryPolicy:
             Must be >= 0; no upper cap (the caller knows their tolerance for
             blocking better than we do).
         retry_on: Exception classes that count as "transient" and trigger a
-            retry. Default ``{ChecksumError, FrameTimeoutError}`` — ``ChecksumError``
-            covers both RTU ``CRCError`` and ASCII ``LRCError``. Modbus exception
-            responses (``IllegalFunctionError`` etc.) are NEVER retried — the
+            retry (matched with ``isinstance``). Default
+            ``{ProtocolError, FrameTimeoutError}``: ``ProtocolError`` covers
+            checksum failures (RTU ``CRCError``, ASCII ``LRCError``), malformed
+            frames (``FrameError``) and replies that do not answer the request
+            (``UnexpectedResponseError``). Modbus exception responses
+            (``IllegalFunctionError`` etc.) are not in the default set — the
             slave told us no, retrying won't change that.
         retry_idempotent_only: If True (default), only read function codes
             (FC 1-4, see :func:`anymodbus.is_idempotent_function`) are
@@ -157,4 +225,5 @@ __all__ = [
     "BusConfig",
     "RetryPolicy",
     "TimingConfig",
+    "estimate_late_reply_window",
 ]

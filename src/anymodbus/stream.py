@@ -4,11 +4,17 @@ Opens an :class:`anyserial.SerialPort` with sensible Modbus defaults and wraps
 it in a :class:`Bus`. Power users who already hold a serial port (or any AnyIO
 byte stream) should construct :class:`Bus` directly — e.g.
 ``Bus(my_stream, framing=Framing.ASCII)`` is the blessed "I own the port" path.
+
+A stream passed to :class:`Bus` may also offer the optional serial-port
+operations described by :class:`SupportsDrain` and
+:class:`SupportsResetInputBuffer`. The bus uses them when the stream has them,
+whatever its type, so a wrapper around a :class:`anyserial.SerialPort` keeps
+drain-after-send and the input reset by forwarding the two methods.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 
 from anyserial import ByteSize, Parity, SerialConfig, open_serial_port
 
@@ -20,6 +26,40 @@ if TYPE_CHECKING:
     from anymodbus.config import BusConfig
 
 ParityLiteral = Literal["none", "even", "odd", "mark", "space"]
+
+
+@runtime_checkable
+class SupportsDrain(Protocol):
+    """A stream that can wait until everything it has sent has left the port.
+
+    When a :class:`Bus` stream has an ``async def drain(self) -> None`` method
+    and :attr:`BusConfig.drain_after_send` is true, the bus awaits it after
+    every send, before it starts reading the reply. On half-duplex RS-485 this
+    keeps the bus from listening while its own request is still going out.
+    :class:`anyserial.SerialPort` implements it.
+    """
+
+    async def drain(self) -> None:
+        """Wait until all written bytes have been transmitted."""
+        ...
+
+
+@runtime_checkable
+class SupportsResetInputBuffer(Protocol):
+    """A stream that can discard bytes it has received but not yet delivered.
+
+    When a :class:`Bus` stream has an ``async def reset_input_buffer(self) ->
+    None`` method and :attr:`BusConfig.reset_input_buffer_before_request` is
+    true, the bus awaits it before every request, so stale bytes from an
+    earlier failure cannot be read as the reply. A wrapper with its own read
+    buffer should clear that buffer too. :class:`anyserial.SerialPort`
+    implements it.
+    """
+
+    async def reset_input_buffer(self) -> None:
+        """Discard received bytes that have not been read yet."""
+        ...
+
 
 _PARITY_MAP: Final[dict[str, Parity]] = {
     "none": Parity.NONE,
@@ -138,4 +178,10 @@ async def open_modbus_ascii(
     )
 
 
-__all__ = ["ParityLiteral", "open_modbus_ascii", "open_modbus_rtu"]
+__all__ = [
+    "ParityLiteral",
+    "SupportsDrain",
+    "SupportsResetInputBuffer",
+    "open_modbus_ascii",
+    "open_modbus_rtu",
+]

@@ -15,7 +15,7 @@ Async-native Modbus RTU client for Python, built on [AnyIO](https://anyio.readth
 
 ## Overview
 
-`anymodbus` is a small, opinionated Modbus **client** (RTU and ASCII serial framing) built on AnyIO and `anyserial`. It is intentionally protocol-only and narrow in scope. It does not ship servers, TCP transport (planned for v0.3), or device-specific drivers — `pymodbus` is the right choice if you need any of those, and the two libraries can coexist in one project.
+`anymodbus` is a small, opinionated Modbus **client** (RTU and ASCII serial framing) built on AnyIO and `anyserial`. It is intentionally protocol-only and narrow in scope. It does not ship servers (beyond the mock slaves for tests in `anymodbus.testing`), TCP transport (planned for v0.4), or device-specific drivers — `pymodbus` is the right choice if you need any of those, and the two libraries can coexist in one project.
 
 The cases `anymodbus` is built for:
 
@@ -24,7 +24,7 @@ The cases `anymodbus` is built for:
 - **Idempotent-only retries by default.** Reads (FC 1-4) retry on transient transport errors; writes (FC 5/6/15/16) do not, unless you opt in. Protects against silent double-writes when a successful write's response is lost in transit.
 - **Strict typing.** `mypy strict = true` plus `pyright typeCheckingMode = "strict"`. `pymodbus` uses partial-strict mypy and `standard` pyright.
 - **Required `baudrate` and `parity`.** No defaults — mismatched parity silently drops every frame, so making it explicit at the call site is worth the small ergonomic cost.
-- **Transport-agnostic.** Takes any `anyio.abc.ByteStream`, defaults to an `anyserial.SerialPort`. TCP support is planned in v0.3 with the same `Bus` API.
+- **Transport-agnostic.** Takes any `anyio.abc.ByteStream`, defaults to an `anyserial.SerialPort`. TCP support is planned in v0.4 with the same `Bus` API.
 
 See [docs/migration-from-pymodbus.md](docs/migration-from-pymodbus.md) for an honest comparison.
 

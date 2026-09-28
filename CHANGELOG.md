@@ -7,6 +7,110 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-28
+
+Hardening driven by the device libraries built on `anymodbus` (`fujilib`,
+`servomexlib`, `watlowlib`): each item below replaces a workaround those
+libraries had to carry. The public API is backwards-compatible; the behaviour
+changes are listed under **Changed** and **Fixed**.
+
+### Added
+
+- **Late-reply window.** `TimingConfig.late_reply_window` (default 0, off).
+  After an attempt whose outcome is uncertain — a timeout, a cancellation, a
+  checksum or framing error, or a reply that does not answer the request —
+  the bus sends nothing until the window has passed, reading and discarding
+  whatever arrives, and waits for the line to be quiet. Without it, a reply
+  that arrives after its request timed out or was cancelled can be taken as
+  the answer to the next request. `estimate_late_reply_window(baudrate=...,
+  max_turnaround=..., max_reply_bytes=256, latency=0.0)` sizes it.
+- **Transaction observers.** `Bus.add_transaction_observer(callback)` (and
+  `Bus(on_transaction=...)`, and the sync `Bus.add_transaction_observer`)
+  reports every attempt as a `TransactionInfo`: slave address, function code,
+  `request_id`, `attempt` / `max_attempts`, `will_retry`, a
+  `TransactionOutcome`, the error, `started_at` / `sent_at` / `ended_at` on the
+  AnyIO clock and `sent_at_ns` / `ended_at_ns` on `time.monotonic_ns()`, and
+  the late bytes discarded before it. `sent_at` is taken after the
+  inter-frame gap, the send and the drain, so readings can be timestamped
+  with when the request actually went out. Retries and recovered errors can
+  be counted from the reports without turning off the bus's own retries.
+- **`TransportError`** (`ConnectionLostError`, `OSError`): an OS-level failure
+  of the stream other than a disconnect or a close.
+- **Server-side building blocks**, for test slaves and simulators:
+  - Request decoders in `anymodbus.pdu` (`decode_read_holding_registers_request`,
+    `decode_write_multiple_registers_request`, ... one per implemented FC)
+    returning frozen dataclasses (`ReadRequest`, `WriteSingleCoilRequest`,
+    `WriteSingleRegisterRequest`, `WriteMultipleCoilsRequest`,
+    `WriteMultipleRegistersRequest`), and response encoders
+    (`encode_read_holding_registers_response`, ...,
+    `encode_exception_response`).
+  - `read_request_adu(stream, *, inter_char_idle)` on both framers (and the
+    `Framer` protocol): reads one request frame for any address, framed by
+    request length, with the checksum verified.
+  - `anymodbus.testing.MockServer`: several `MockSlave`s on one line, routed
+    by address. `client_server_pair(*slaves, ...)` wires one to a bus.
+  - `MockSlave.handle(request_pdu)` as the public extension point, the public
+    `ServerException(code)` to answer with an exception response,
+    `MockSlave.send_response(stream, pdu)`, and `MockSlave.response_count`.
+  - `QuantityLimits`: per-request quantity caps on a `MockSlave` (and
+    `client_slave_pair(limits=...)`), e.g. a device limited to 64 registers.
+- **`anymodbus.stream.SupportsDrain` / `SupportsResetInputBuffer`**: the
+  optional stream methods the bus uses, as runtime-checkable protocols.
+
+### Changed
+
+- **Replies are checked against the request.** A register read whose reply
+  carries a different number of registers, a coil / discrete-input read whose
+  byte count does not fit the requested count, and a write (FC 0x05, 0x06,
+  0x0F, 0x10) whose echoed address, value or quantity differs from the
+  request now raise `UnexpectedResponseError`. Before, a well-formed reply of
+  the wrong length was returned as a shorter or longer tuple, and write echoes
+  were not compared. `decode_read_holding_registers_response` /
+  `decode_read_input_registers_response` accept a keyword-only
+  `expected_count` for the same check.
+- **The check runs inside each attempt**, so a reply that fails it is retried,
+  reported to observers, and opens a late-reply window like any other bad
+  reply.
+- **Default `RetryPolicy.retry_on` is now `{ProtocolError, FrameTimeoutError}`**
+  (was `{ChecksumError, FrameTimeoutError}`). Reads are now also retried on a
+  malformed frame (`FrameError`) and on a reply that does not answer the
+  request (`UnexpectedResponseError`); writes are still not retried by
+  default (`retry_idempotent_only=True`). As in 0.2.0, only set membership
+  changed for subclasses: `ChecksumError in cfg.retries.retry_on` is now
+  `False`, though checksum errors are still retried.
+- **Bad arguments raise `ConfigurationError`** instead of a bare `ValueError`
+  throughout the PDU codec, both ADU encoders, the register decoders and
+  encoders, the broadcast path and `MockSlave`. `ConfigurationError` is a
+  `ValueError`, so existing `except ValueError` handlers still catch it.
+- **The bus uses any stream's `drain()` and `reset_input_buffer()`**, not
+  only an `anyserial.SerialPort`'s, when they are async methods. A wrapper
+  around a serial port keeps drain-after-send and the input reset by
+  forwarding them.
+- `MockSlave` answers a request with a function code it does not implement
+  with exception code 0x01 (ILLEGAL FUNCTION), as a device should, instead of
+  stopping its serve loop. `MockSlave.serve` runs through `MockServer`.
+
+### Fixed
+
+- **Port failures are `ModbusError`s.** An `OSError` from the stream that is
+  not a disconnect or a close (for example an `anyserial.SerialError` for an
+  unmapped errno or Windows error code, or a failing `drain`) now raises
+  `TransportError`, which is still an `OSError`, instead of escaping raw. The
+  input reset before a request now runs inside the transaction's error
+  handling, so its failures are translated too, and the next request still
+  gets its inter-frame gap.
+- **A reply whose function code the client never sends is line damage, not
+  "unsupported".** A reply carrying FC 0x07, 0x0B, 0x0C, 0x11, 0x14, 0x15,
+  0x18 or 0x2B raised `ModbusUnsupportedFunctionError`, which is not retried
+  and reads as "the device lacks this function" (on a write, as "the write
+  was refused"). It is now read to the idle gap and checked: a damaged frame
+  (06 → 07, 03 → 0B, ... are one bit apart) raises `CRCError`, and a
+  checksum-valid one raises `UnexpectedResponseError`; reads retry either.
+  `ModbusUnsupportedFunctionError` remains for the send side.
+- Documentation: `FaultPlan.corrupt_crc_after_n` / `drop_response_after_n`
+  fire once, at the response with that 0-based index; `client_slave_pair`
+  uses real serial ports, so the baud rate, drain and input reset all apply.
+
 ## [0.2.1] - 2026-09-28
 
 ### Fixed
@@ -145,7 +249,8 @@ Initial release. See [DESIGN.md](DESIGN.md) for the full plan.
 - `anymodbus.testing` with `MockSlave`, `FaultPlan`, and `client_slave_pair()`
   for hardware-free integration tests.
 
-[Unreleased]: https://github.com/GraysonBellamy/anymodbus/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/GraysonBellamy/anymodbus/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/GraysonBellamy/anymodbus/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/GraysonBellamy/anymodbus/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/GraysonBellamy/anymodbus/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/GraysonBellamy/anymodbus/compare/v0.1.0...v0.1.1

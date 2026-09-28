@@ -3,7 +3,15 @@
 `anymodbus.testing` exposes everything needed to write integration tests for protocol-layer code without hardware.
 
 ```python
-from anymodbus.testing import FaultPlan, MockSlave, client_slave_pair
+from anymodbus.testing import (
+    FaultPlan,
+    MockServer,
+    MockSlave,
+    QuantityLimits,
+    ServerException,
+    client_server_pair,
+    client_slave_pair,
+)
 ```
 
 ## In-memory bus + slave pair
@@ -19,9 +27,10 @@ async with client_slave_pair(slave_address=1) as (bus, mock):
     assert mock.holding_registers[7] == 0xCAFE
 ```
 
-The pair is built on `anyserial.testing.serial_port_pair`, so:
+The pair is built on `anyserial.testing.serial_port_pair`, whose ends are real `anyserial.SerialPort`s, so:
 
 - The framer, CRC, length-aware reader, and timing path all run unchanged.
+- The bus sees the configured `baudrate` for its auto timing, and uses the ports' drain and input reset.
 - Bytes flow through the same byte-stream API the real bus uses.
 - Tests exercising scheduler-jitter behaviour (chunked receives, idle-gap drain) are real, not stubbed.
 
@@ -51,6 +60,57 @@ async with client_slave_pair(
     ...  # FC 2 / 4 against this mock raise IllegalFunctionError
 ```
 
+## Quantity limits
+
+Real devices often cap a request below the spec maximum. `QuantityLimits` makes a mock slave refuse larger requests with `IllegalDataValueError`, as such a device would:
+
+```python
+async with client_slave_pair(limits=QuantityLimits(read_registers=64)) as (bus, mock):
+    await bus.slave(1).read_holding_registers(0, count=64)  # fine
+    await bus.slave(1).read_holding_registers(0, count=65)  # IllegalDataValueError
+```
+
+## Simulating a device: override `handle`
+
+`MockSlave.handle(request_pdu) -> response_pdu` answers one request. Override it to simulate a particular device, and call `super().handle(...)` for the requests the register banks should answer. Raise `ServerException(code)` to answer with a Modbus exception response:
+
+```python
+from anymodbus import ExceptionCode
+from anymodbus.pdu import decode_read_input_registers_request
+
+
+class Analyzer(MockSlave):
+    def handle(self, request_pdu: bytes) -> bytes:
+        if request_pdu[0] == 0x04:
+            request = decode_read_input_registers_request(request_pdu)
+            if request.address >= 0x0100:
+                raise ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
+        return super().handle(request_pdu)
+```
+
+A malformed request, or one whose quantity is outside the spec range, is answered with `ILLEGAL_DATA_VALUE`; a function code the slave doesn't implement with `ILLEGAL_FUNCTION`.
+
+## Several slaves on one line
+
+`MockSlave.serve()` owns its stream, so two slaves serving the same stream would compete for bytes. `MockServer` owns the stream instead, reads each request once, and routes it by address: an absent address gets no reply, a request with a bad checksum is dropped, and a broadcast is applied by every slave and answered by none. `client_server_pair` wires one to a bus:
+
+```python
+one, two = Analyzer(address=1), MockSlave(address=2)
+async with client_server_pair(one, two) as (bus, server):
+    await bus.slave(1).read_input_registers(0, count=4)
+    await bus.slave(2).write_register(0, 7)
+```
+
+It accepts `on_request=callback`, called with `(address, request_pdu)` for every valid request — handy for asserting what went out on the line and when.
+
+## Writing your own server
+
+The pieces `MockServer` is built from are public, for a simulator that doesn't fit `MockSlave`:
+
+- `anymodbus.framing.get_framer(framing).read_request_adu(stream, inter_char_idle=...)` reads one request frame for any address and returns `(address, request_pdu)`, raising `ChecksumError` for a bad checksum (the frame is consumed) and `anyio.EndOfStream` when the stream closes between frames.
+- `anymodbus.pdu` has a request decoder per function code (`decode_read_holding_registers_request`, `decode_write_multiple_registers_request`, …, returning small frozen dataclasses) and a response encoder per function code (`encode_read_holding_registers_response`, …, and `encode_exception_response`).
+- `MockSlave.send_response(stream, response_pdu)` sends a reply as that slave, with its `FaultPlan` applied.
+
 ## Fault injection
 
 ```python
@@ -64,6 +124,8 @@ plan = FaultPlan(
 async with client_slave_pair(faults=plan) as (bus, mock):
     ...
 ```
+
+The `*_after_n` fields name one response by its 0-based index among the responses the slave sends, and fire only on that response. `MockSlave.response_count` is the index of the next one.
 
 Faults compose. Use them to exercise:
 

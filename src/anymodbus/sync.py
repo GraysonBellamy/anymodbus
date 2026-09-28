@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from anymodbus.config import BusConfig
     from anymodbus.slave import Slave as _AsyncSlave
     from anymodbus.stream import ParityLiteral
+    from anymodbus.transaction import TransactionObserver
 
 _LOGGER = logging.getLogger("anymodbus.sync")
 
@@ -129,6 +130,18 @@ class Bus:
         """
         async_slave = self._async_bus.slave(address)
         return Slave(async_slave, portal=self._portal)
+
+    def add_transaction_observer(self, observer: TransactionObserver) -> Callable[[], None]:
+        """Call ``observer`` with a :class:`anymodbus.TransactionInfo` after every attempt.
+
+        See :meth:`anymodbus.Bus.add_transaction_observer`. The observer runs on
+        the event-loop thread behind this sync bus, not on the calling thread,
+        so anything it shares with the caller must be thread-safe.
+
+        Returns:
+            A function that removes ``observer`` again.
+        """
+        return self._async_bus.add_transaction_observer(observer)
 
     # ------------------------------------------------------------------
     # Broadcast methods — sync mirrors of Bus.broadcast_*

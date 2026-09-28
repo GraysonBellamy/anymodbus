@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from anymodbus import BusConfig, RetryPolicy, TimingConfig
+from anymodbus import BusConfig, RetryPolicy, TimingConfig, estimate_late_reply_window
 from anymodbus.exceptions import (
-    ChecksumError,
     ConfigurationError,
     CRCError,
+    FrameError,
     FrameTimeoutError,
     LRCError,
+    ProtocolError,
+    UnexpectedResponseError,
 )
 
 
@@ -56,11 +58,11 @@ class TestRetryPolicy:
         assert rp.retries == 1
         assert rp.retry_idempotent_only is True
         assert rp.backoff_base == 0.0
-        # Default widened to ChecksumError so both RTU CRC and ASCII LRC retry.
-        assert rp.retry_on == frozenset({ChecksumError, FrameTimeoutError})
-        # CRCError and LRCError are subclasses, so they're retried via isinstance.
-        assert issubclass(CRCError, ChecksumError)
-        assert issubclass(LRCError, ChecksumError)
+        # Every ProtocolError (checksum, malformed frame, mismatched reply) plus
+        # a timeout. Subclasses are retried via isinstance.
+        assert rp.retry_on == frozenset({ProtocolError, FrameTimeoutError})
+        for cls in (CRCError, LRCError, FrameError, UnexpectedResponseError):
+            assert issubclass(cls, ProtocolError)
 
     def test_retries_negative_rejected(self) -> None:
         with pytest.raises(ConfigurationError):
@@ -88,6 +90,14 @@ class TestTimingConfig:
         assert tc.post_tx_settle == 0.0
         assert tc.broadcast_turnaround == 0.1
         assert tc.startup_settle == 0.0
+        assert tc.late_reply_window == 0.0
+
+    def test_negative_late_reply_window_rejected(self) -> None:
+        with pytest.raises(ConfigurationError):
+            TimingConfig(late_reply_window=-0.001)
+
+    def test_late_reply_window_accepted(self) -> None:
+        assert TimingConfig(late_reply_window=0.1).late_reply_window == 0.1
 
     def test_negative_startup_settle_rejected(self) -> None:
         with pytest.raises(ConfigurationError):
@@ -116,3 +126,29 @@ class TestTimingConfig:
     def test_negative_broadcast_turnaround_rejected(self) -> None:
         with pytest.raises(ConfigurationError):
             TimingConfig(broadcast_turnaround=-0.001)
+
+
+class TestEstimateLateReplyWindow:
+    def test_sums_turnaround_transmission_and_latency(self) -> None:
+        # 30 ms turnaround + 133 characters at 38400 baud (11 bits each) + 16 ms.
+        window = estimate_late_reply_window(
+            baudrate=38_400, max_turnaround=0.03, max_reply_bytes=133, latency=0.016
+        )
+        assert window == pytest.approx(0.03 + 133 * 11 / 38_400 + 0.016)
+
+    def test_default_reply_is_the_largest_rtu_adu(self) -> None:
+        window = estimate_late_reply_window(baudrate=19_200, max_turnaround=0.0)
+        assert window == pytest.approx(256 * 11 / 19_200)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"baudrate": 0, "max_turnaround": 0.0},
+            {"baudrate": 9600, "max_turnaround": -0.1},
+            {"baudrate": 9600, "max_turnaround": 0.0, "max_reply_bytes": 0},
+            {"baudrate": 9600, "max_turnaround": 0.0, "latency": -0.001},
+        ],
+    )
+    def test_bad_arguments_rejected(self, kwargs: dict[str, float]) -> None:
+        with pytest.raises(ConfigurationError):
+            estimate_late_reply_window(**kwargs)  # type: ignore[arg-type]
