@@ -7,6 +7,20 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-28
+
+### Fixed
+
+- **Inter-frame idle gap after a failed transaction.** `inter_frame_idle` is now
+  measured from the end of the previous transaction however it ended. Before, it
+  was measured from the end only after a normal reply. After an exception
+  response, a CRC/LRC or framing error, an unexpected response, a timeout or a
+  cancellation, it was measured from when the previous request was sent. A reply
+  slower than the gap (as most real devices' are) had already used it up, so the
+  next request went out straight after the error. A cancelled broadcast now also
+  leaves the gap in place. The first request after an error may now wait up to
+  `inter_frame_idle` longer than before. Found by `fujilib`.
+
 ## [0.2.0] - 2026-05-30
 
 Adds Modbus-ASCII framing, FC08 diagnostic loopback, FC04 input-register typed
@@ -131,6 +145,8 @@ Initial release. See [DESIGN.md](DESIGN.md) for the full plan.
 - `anymodbus.testing` with `MockSlave`, `FaultPlan`, and `client_slave_pair()`
   for hardware-free integration tests.
 
-[Unreleased]: https://github.com/GraysonBellamy/anymodbus/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/GraysonBellamy/anymodbus/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/GraysonBellamy/anymodbus/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/GraysonBellamy/anymodbus/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/GraysonBellamy/anymodbus/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/GraysonBellamy/anymodbus/releases/tag/v0.1.0

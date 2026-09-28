@@ -339,6 +339,11 @@ class Bus:
                     _LOGGER.debug("tx (broadcast) %s", adu.hex())
                 await self._stream.send(adu)
                 await self._maybe_drain()
+                # *serial §2.4.1*: the master must hold the bus idle for the
+                # turnaround delay so every slave finishes processing before the
+                # next transaction. The lock is held across the sleep, blocking
+                # any unicast follow-up that might otherwise preempt slaves.
+                await anyio.sleep(self._config.timing.broadcast_turnaround)
             except anyio.BrokenResourceError as e:
                 msg = f"stream disconnected during broadcast tx: {e}"
                 raise ConnectionLostError(msg) from e
@@ -346,13 +351,10 @@ class Bus:
                 self._closed = True
                 msg = "bus stream was closed during broadcast tx"
                 raise BusClosedError(msg) from e
-
-            # *serial §2.4.1*: the master must hold the bus idle for the
-            # turnaround delay so every slave finishes processing before the
-            # next transaction. The lock is held across the sleep, blocking
-            # any unicast follow-up that might otherwise preempt slaves.
-            await anyio.sleep(self._config.timing.broadcast_turnaround)
-            self._last_io_monotonic = anyio.current_time()
+            finally:
+                # Stamp even when cancelled mid-send or mid-turnaround, so the
+                # next frame still gets its idle gap (see ``_one_txn``).
+                self._last_io_monotonic = anyio.current_time()
 
     # ------------------------------------------------------------------
     # Private helpers.
@@ -436,7 +438,6 @@ class Bus:
         try:
             await self._stream.send(adu)
             await self._maybe_drain()
-            self._last_io_monotonic = anyio.current_time()
             # Some RS-485 transceivers need a settling delay between RTS
             # de-assert and starting to listen; honour it before the rx wait.
             if self._config.timing.post_tx_settle > 0:
@@ -471,8 +472,15 @@ class Bus:
             self._closed = True
             msg = "bus stream was closed during transaction"
             raise BusClosedError(msg) from e
+        finally:
+            # The next frame's idle gap runs from the end of THIS attempt,
+            # however it ended: a reply, an exception response, a checksum or
+            # framing error, a timeout, or cancellation. Stamping only on
+            # success left the send time in place, so a reply that took longer
+            # than the idle gap used it up and the next request went out
+            # immediately.
+            self._last_io_monotonic = anyio.current_time()
 
-        self._last_io_monotonic = anyio.current_time()
         return response_pdu
 
     def _should_retry(
