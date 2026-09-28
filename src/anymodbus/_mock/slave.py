@@ -1,6 +1,6 @@
 """Mock Modbus slave for tests — a register bank that speaks the wire format.
 
-:class:`MockSlave` is a pure-Python server that runs alongside a :class:`Bus`
+:class:`MockSlave` is a pure-Python slave that runs alongside a :class:`Bus`
 in tests, decoding requests and producing responses against four mutable
 register banks (coils, discrete inputs, holding registers, input registers).
 
@@ -8,39 +8,56 @@ It deliberately mirrors the on-wire framing the real :mod:`anymodbus.framer`
 expects, so integration tests exercise the same length-aware reader, CRC
 verification, and timing behaviour they would against real hardware.
 
-:class:`FaultPlan` lets a test script transient failures (CRC corruption,
-response delay, wrong slave address, dropped responses) without having to
-write a custom mock for each scenario.
+:meth:`MockSlave.handle` answers one request PDU and is the extension point
+for simulating a particular device; raise :class:`ServerException` from it to
+send an exception response. :class:`QuantityLimits` caps request sizes the way
+a real device does. :class:`FaultPlan` lets a test script transient failures
+(CRC corruption, response delay, wrong slave address, dropped responses)
+without having to write a custom mock for each scenario. To put several mock
+slaves on one line, serve them together with :class:`MockServer`.
 """
 
 from __future__ import annotations
 
 import logging
 import struct
-from typing import TYPE_CHECKING, Final
+from dataclasses import dataclass
 
 import anyio
 import anyio.abc
 
 from anymodbus._mock.faults import FaultPlan
 from anymodbus._types import ExceptionCode, Framing, FunctionCode
-from anymodbus.crc import crc16_modbus_bytes, verify_crc
-from anymodbus.exceptions import FrameError
-from anymodbus.framer_ascii import encode_ascii_adu, read_ascii_frame
-from anymodbus.lrc import lrc8_bytes, verify_lrc
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from anymodbus.crc import crc16_modbus_bytes
+from anymodbus.exceptions import ConfigurationError
+from anymodbus.framer_ascii import encode_ascii_adu
+from anymodbus.lrc import lrc8_bytes
+from anymodbus.pdu import (
+    ReadRequest,
+    decode_diagnostic_loopback_request,
+    decode_read_coils_request,
+    decode_read_discrete_inputs_request,
+    decode_read_holding_registers_request,
+    decode_read_input_registers_request,
+    decode_write_multiple_coils_request,
+    decode_write_multiple_registers_request,
+    decode_write_single_coil_request,
+    decode_write_single_register_request,
+    encode_diagnostic_loopback_response,
+    encode_read_coils_response,
+    encode_read_discrete_inputs_response,
+    encode_read_holding_registers_response,
+    encode_read_input_registers_response,
+    encode_write_multiple_coils_response,
+    encode_write_multiple_registers_response,
+    encode_write_single_coil_response,
+    encode_write_single_register_response,
+)
 
 _LOGGER = logging.getLogger("anymodbus.mock")
 
-_BROADCAST_ADDRESS = 0
 _MIN_SLAVE_ADDRESS = 1
 _MAX_SLAVE_ADDRESS = 247  # *Modbus over Serial Line v1.02 §2.2*
-
-# Wire encodings for FC 0x05 Write Single Coil (*app §6.5*).
-_COIL_ON = 0xFF00
-_COIL_OFF = 0x0000
 
 # Spec quantity bounds — see *app §6.x*. These mirror the client-side bounds
 # in :mod:`anymodbus.pdu`; we duplicate the constants rather than importing
@@ -50,40 +67,63 @@ _MAX_READ_REGISTERS = 125
 _MAX_WRITE_COILS = 1968
 _MAX_WRITE_REGISTERS = 123
 
-# Bytes after the 2-byte (slave + fc) request header for fixed-length request
-# bodies, INCLUDING the 2-byte trailing CRC. FC 0x0F / 0x10 carry a 1-byte
-# byte_count after this fixed prefix and are handled separately.
-_FIXED_REQUEST_TAIL: Final[Mapping[int, int]] = {
-    FunctionCode.READ_COILS: 6,  # addr(2) + count(2) + crc(2)
-    FunctionCode.READ_DISCRETE_INPUTS: 6,
-    FunctionCode.READ_HOLDING_REGISTERS: 6,
-    FunctionCode.READ_INPUT_REGISTERS: 6,
-    FunctionCode.WRITE_SINGLE_COIL: 6,  # addr(2) + value(2) + crc(2)
-    FunctionCode.WRITE_SINGLE_REGISTER: 6,
-    FunctionCode.DIAGNOSTICS: 6,  # subfunction(2) + data(2) + crc(2) — sub-0 only
-}
-
-_VARIABLE_REQUEST_FCS: Final[frozenset[int]] = frozenset(
-    {FunctionCode.WRITE_MULTIPLE_COILS, FunctionCode.WRITE_MULTIPLE_REGISTERS}
-)
-
-_CRC_LEN = 2
-
-# Length of the FC 0x0F / 0x10 request prefix on the wire (FC byte + address(2) +
-# count(2) + byte_count(1)). The variable-length data payload follows.
-_WRITE_MULTIPLE_REQUEST_PREFIX_LEN = 6
-
 # FC 0x08 Diagnostics: only sub-function 0x0000 (Return Query Data) is modelled.
 _DIAG_SUBFN_RETURN_QUERY_DATA = 0x0000
 _DIAG_REQUEST_PDU_LEN = 5  # fc(1) + subfn(2) + data(2)
 
 
-class _ServerException(Exception):  # noqa: N818 — internal sentinel, not user-visible
-    """Internal: signals that a handler wants the loop to emit an exception PDU."""
+class ServerException(Exception):  # noqa: N818 — named for the spec's "exception response"
+    """Raise from :meth:`MockSlave.handle` to answer with a Modbus exception response.
 
-    def __init__(self, code: ExceptionCode) -> None:
+    The serving loop turns it into ``function_code | 0x80`` followed by
+    :attr:`code`, the way a real device refuses a request.
+
+    Args:
+        code: The exception code to send, usually an :class:`ExceptionCode`
+            such as :attr:`ExceptionCode.ILLEGAL_DATA_ADDRESS`.
+    """
+
+    def __init__(self, code: ExceptionCode | int) -> None:
         super().__init__(int(code))
         self.code = code
+
+
+# Also importable under this name, for subclasses that raise it by it.
+_ServerException = ServerException
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class QuantityLimits:
+    """The largest quantity a :class:`MockSlave` accepts in one request, per kind.
+
+    Defaults are the spec maxima. A lower value simulates a device with a
+    smaller cap (e.g. ``QuantityLimits(read_registers=64)``); a request above
+    it is answered with :attr:`ExceptionCode.ILLEGAL_DATA_VALUE`, as the spec
+    requires for a quantity out of range.
+
+    Attributes:
+        read_bits: FC 0x01 / 0x02, at most 2000.
+        read_registers: FC 0x03 / 0x04, at most 125.
+        write_coils: FC 0x0F, at most 1968.
+        write_registers: FC 0x10, at most 123.
+    """
+
+    read_bits: int = _MAX_READ_BITS
+    read_registers: int = _MAX_READ_REGISTERS
+    write_coils: int = _MAX_WRITE_COILS
+    write_registers: int = _MAX_WRITE_REGISTERS
+
+    def __post_init__(self) -> None:
+        """Validate each limit against its spec maximum."""
+        for name, value, spec_max in (
+            ("read_bits", self.read_bits, _MAX_READ_BITS),
+            ("read_registers", self.read_registers, _MAX_READ_REGISTERS),
+            ("write_coils", self.write_coils, _MAX_WRITE_COILS),
+            ("write_registers", self.write_registers, _MAX_WRITE_REGISTERS),
+        ):
+            if not (1 <= value <= spec_max):
+                msg = f"{name} must be in [1, {spec_max}] (got {value!r})"
+                raise ConfigurationError(msg)
 
 
 class MockSlave:
@@ -96,6 +136,10 @@ class MockSlave:
     Address validation matches *Modbus over Serial Line v1.02 §2.2*:
     addresses 1-247 are unicast, 0 is broadcast (the slave still applies
     write requests but does not respond), and 248-255 are reserved.
+
+    To simulate a particular device, subclass and override :meth:`handle`,
+    calling ``super().handle(request_pdu)`` for the requests the register
+    banks should answer.
     """
 
     address: int
@@ -106,6 +150,7 @@ class MockSlave:
     faults: FaultPlan
     disabled_function_codes: frozenset[int]
     framing: Framing
+    limits: QuantityLimits
 
     def __init__(
         self,
@@ -118,6 +163,7 @@ class MockSlave:
         faults: FaultPlan | None = None,
         disabled_function_codes: frozenset[int] | None = None,
         framing: Framing = Framing.RTU,
+        limits: QuantityLimits | None = None,
     ) -> None:
         """Construct a mock slave.
 
@@ -141,13 +187,14 @@ class MockSlave:
             framing: Wire framing the slave reads and emits — :attr:`Framing.RTU`
                 (binary + CRC) or :attr:`Framing.ASCII` (``:``..LRC..CRLF). The
                 same register banks back either framing.
+            limits: Per-request quantity caps. Defaults to the spec maxima.
         """
         if not (_MIN_SLAVE_ADDRESS <= address <= _MAX_SLAVE_ADDRESS):
             msg = (
                 f"MockSlave address must be 1-247 (got {address!r}); "
                 f"address 0 is broadcast and 248-255 are reserved"
             )
-            raise ValueError(msg)
+            raise ConfigurationError(msg)
         if discrete_input_count is None:
             discrete_input_count = coil_count
         if input_register_count is None:
@@ -162,171 +209,121 @@ class MockSlave:
             disabled_function_codes if disabled_function_codes is not None else frozenset()
         )
         self.framing = framing
+        self.limits = limits if limits is not None else QuantityLimits()
         self._coil_count = coil_count
         self._discrete_input_count = discrete_input_count
-        self._register_count = register_count
-        self._input_register_count = input_register_count
         # Index of the next response we will emit. Used for FaultPlan's
         # corrupt_crc_after_n / drop_response_after_n one-shot triggers.
         self._responses_emitted = 0
 
+    @property
+    def response_count(self) -> int:
+        """Responses this slave has produced so far, including dropped ones.
+
+        The 0-based index of the next response is this value; it is the index
+        :class:`FaultPlan`'s ``*_after_n`` fields refer to.
+        """
+        return self._responses_emitted
+
     async def serve(self, stream: anyio.abc.ByteStream) -> None:
         """Accept requests on ``stream``, write responses, until cancelled.
 
-        Loops forever (or until the stream closes / the task is cancelled)
-        reading one request per iteration. Bad checksums (CRC for RTU, LRC for
-        ASCII) are logged and dropped — there is no in-band recovery mechanism
-        on a real Modbus bus, so the mock mirrors that behaviour. The framing
-        (:attr:`framing`) selects the RTU or ASCII wire reader.
+        Serves this slave alone, as ``MockServer(self, framing=self.framing)``
+        would. Bad checksums (CRC for RTU, LRC for ASCII) and unreadable
+        frames are logged and dropped — there is no in-band recovery
+        mechanism on a real Modbus bus, so the mock mirrors that behaviour.
+        Returns when the stream closes.
         """
-        serve_one = self._serve_one_ascii if self.framing is Framing.ASCII else self._serve_one_rtu
-        while True:
-            try:
-                continue_loop = await serve_one(stream)
-            except (anyio.EndOfStream, anyio.ClosedResourceError):
-                return
-            if not continue_loop:
-                return
+        from anymodbus._mock.server import MockServer  # noqa: PLC0415 — server imports this module
 
-    async def _serve_one_rtu(self, stream: anyio.abc.ByteStream) -> bool:
-        head = await self._read_exact(stream, 2)
-        addr = head[0]
-        fc = head[1]
+        await MockServer(self, framing=self.framing).serve(stream)
 
-        if fc in _FIXED_REQUEST_TAIL:
-            tail = await self._read_exact(stream, _FIXED_REQUEST_TAIL[fc])
-        elif fc in _VARIABLE_REQUEST_FCS:
-            # addr(2) + count(2) + byte_count(1) + data(byte_count) + crc(2)
-            prefix = await self._read_exact(stream, 5)
-            byte_count = prefix[4]
-            rest = await self._read_exact(stream, byte_count + _CRC_LEN)
-            tail = prefix + rest
-        else:
-            # Unknown FC. We don't have length info to drain the body
-            # safely; the safest action is to log and stop serving so the
-            # test fails loudly rather than silently corrupting later frames.
-            _LOGGER.warning("MockSlave: unsupported FC 0x%02x; closing serve loop", fc)
-            return False
+    def handle(self, request_pdu: bytes) -> bytes:
+        """Answer one request PDU (FC byte + body) with a response PDU.
 
-        full_request = head + tail
-        if not verify_crc(full_request):
-            _LOGGER.warning("MockSlave: CRC mismatch on request, dropping")
-            return True
+        The extension point for simulating a device: override it, handle the
+        requests you want to customise, and call ``super().handle(request_pdu)``
+        for the rest. Raise :class:`ServerException` to answer with a Modbus
+        exception response; a :class:`anymodbus.ProtocolError` from a request
+        decoder (a malformed request, or a quantity outside the spec range) is
+        answered with :attr:`ExceptionCode.ILLEGAL_DATA_VALUE`.
 
-        request_pdu = full_request[1:-_CRC_LEN]  # strip slave addr + CRC
-        response_pdu = self._dispatch(addr, request_pdu)
-        if response_pdu is not None:
-            await self._send_response_rtu(stream, response_pdu)
-        return True
-
-    async def _serve_one_ascii(self, stream: anyio.abc.ByteStream) -> bool:
-        try:
-            raw = await read_ascii_frame(stream)
-        except FrameError:
-            # Malformed frame we can't even de-hex. A clean close between frames
-            # surfaces as EndOfStream (handled in serve()), not FrameError, so
-            # this branch is genuinely a corrupt request: drop and keep serving.
-            _LOGGER.warning("MockSlave: malformed ASCII request frame, dropping")
-            return True
-        if not verify_lrc(raw):
-            # Mirror the RTU bad-CRC drop (decision D2) — caller branches on the
-            # bool, no exception to crash the serve task.
-            _LOGGER.warning("MockSlave: LRC mismatch on request, dropping")
-            return True
-
-        addr, request_pdu = raw[0], raw[1:-1]  # strip slave addr + LRC
-        response_pdu = self._dispatch(addr, request_pdu)
-        if response_pdu is not None:
-            await self._send_response_ascii(stream, response_pdu)
-        return True
-
-    def _dispatch(self, addr: int, request_pdu: bytes) -> bytes | None:
-        """Shared request handling for both framings.
-
-        Returns the response PDU to emit, or ``None`` when nothing should be
-        sent (request for another slave, or a broadcast — *serial §2.1*).
+        The default answers FC 0x01-0x06, 0x0F, 0x10 and 0x08 sub-function 0
+        from the register banks, within :attr:`limits`, refuses
+        :attr:`disabled_function_codes` and any other FC with
+        :attr:`ExceptionCode.ILLEGAL_FUNCTION`, and applies broadcast writes
+        the same way (the server sends no reply to a broadcast).
         """
-        if addr not in (self.address, _BROADCAST_ADDRESS):
-            return None
-        try:
-            response_pdu = self._handle_request(request_pdu)
-        except _ServerException as exc:
-            response_pdu = bytes((request_pdu[0] | 0x80, int(exc.code)))
-        if addr == _BROADCAST_ADDRESS:
-            return None
-        return response_pdu
+        return self._handle_request(request_pdu)
 
-    def _should_drop_or_delay(self) -> tuple[bool, int]:
-        """Advance the response counter; return ``(dropped, idx)`` for this response."""
+    async def send_response(self, stream: anyio.abc.ByteStream, response_pdu: bytes) -> None:
+        """Send ``response_pdu`` on ``stream`` as this slave, applying :attr:`faults`.
+
+        Frames it for :attr:`framing` with this slave's address. The
+        :class:`FaultPlan` may drop it, delay it, corrupt its checksum, or send
+        it from another address. Every call counts towards
+        :attr:`response_count`, dropped or not.
+        """
         idx = self._responses_emitted
         self._responses_emitted += 1
         plan = self.faults
         if plan.drop_response_after_n is not None and idx == plan.drop_response_after_n:
             _LOGGER.info("MockSlave: dropping response %d per FaultPlan", idx)
-            return True, idx
-        return False, idx
-
-    async def _send_response_rtu(self, stream: anyio.abc.ByteStream, response_pdu: bytes) -> None:
-        dropped, idx = self._should_drop_or_delay()
-        if dropped:
             return
-        plan = self.faults
         if plan.delay_response_seconds > 0:
             await anyio.sleep(plan.delay_response_seconds)
-
         slave_byte = (
             plan.wrong_slave_address if plan.wrong_slave_address is not None else self.address
         )
-        head = bytes((slave_byte,)) + response_pdu
-        crc = crc16_modbus_bytes(head)
-
-        if plan.corrupt_crc_after_n is not None and idx == plan.corrupt_crc_after_n:
-            _LOGGER.info("MockSlave: corrupting CRC on response %d per FaultPlan", idx)
+        corrupt = plan.corrupt_crc_after_n is not None and idx == plan.corrupt_crc_after_n
+        if corrupt:
+            _LOGGER.info("MockSlave: corrupting the checksum of response %d per FaultPlan", idx)
+        body = bytes((slave_byte,)) + response_pdu
+        if self.framing is Framing.ASCII:
+            if corrupt:
+                # Flip a bit of the binary LRC before hex-encoding, so the
+                # client sees LRCError rather than a malformed frame.
+                frame = bytearray(body + lrc8_bytes(body))
+                frame[-1] ^= 0x01
+                await stream.send(b":" + frame.hex().upper().encode("ascii") + b"\r\n")
+                return
+            await stream.send(encode_ascii_adu(slave_address=slave_byte, pdu=response_pdu))
+            return
+        crc = crc16_modbus_bytes(body)
+        if corrupt:
             crc = bytes((crc[0] ^ 0x01, crc[1]))
-
-        await stream.send(head + crc)
-
-    async def _send_response_ascii(self, stream: anyio.abc.ByteStream, response_pdu: bytes) -> None:
-        dropped, idx = self._should_drop_or_delay()
-        if dropped:
-            return
-        plan = self.faults
-        if plan.delay_response_seconds > 0:
-            await anyio.sleep(plan.delay_response_seconds)
-
-        slave_byte = (
-            plan.wrong_slave_address if plan.wrong_slave_address is not None else self.address
-        )
-        if plan.corrupt_crc_after_n is not None and idx == plan.corrupt_crc_after_n:
-            # Same fault, framing-aware: corrupt the LRC by flipping a bit of
-            # the binary frame before hex-encoding, so the client sees LRCError.
-            _LOGGER.info("MockSlave: corrupting LRC on response %d per FaultPlan", idx)
-            body = bytes((slave_byte,)) + response_pdu
-            frame = bytearray(body + lrc8_bytes(body))
-            frame[-1] ^= 0x01
-            await stream.send(b":" + frame.hex().upper().encode("ascii") + b"\r\n")
-            return
-
-        await stream.send(encode_ascii_adu(slave_address=slave_byte, pdu=response_pdu))
+        await stream.send(body + crc)
 
     # ------------------------------------------------------------------
-    # Per-FC handlers. Each takes the request PDU (FC byte + body) and
-    # returns the response PDU (FC byte + body), or raises
-    # :class:`_ServerException` to be translated into an exception PDU.
+    # Per-FC handlers. ``handle`` delegates here; subclasses may override
+    # either. Each takes the request PDU (FC byte + body) and returns the
+    # response PDU, or raises ServerException / ProtocolError.
     # ------------------------------------------------------------------
 
     def _handle_request(self, pdu: bytes) -> bytes:  # noqa: PLR0911 — one return per FC
         fc = pdu[0]
         if fc in self.disabled_function_codes:
-            raise _ServerException(ExceptionCode.ILLEGAL_FUNCTION)
+            raise ServerException(ExceptionCode.ILLEGAL_FUNCTION)
         if fc == FunctionCode.READ_COILS:
-            return self._handle_read_bits(pdu, self.coils, self._coil_count)
+            bits = self._read_bits(decode_read_coils_request(pdu), self.coils, self._coil_count)
+            return encode_read_coils_response(bits)
         if fc == FunctionCode.READ_DISCRETE_INPUTS:
-            return self._handle_read_bits(pdu, self.discrete_inputs, self._discrete_input_count)
+            bits = self._read_bits(
+                decode_read_discrete_inputs_request(pdu),
+                self.discrete_inputs,
+                self._discrete_input_count,
+            )
+            return encode_read_discrete_inputs_response(bits)
         if fc == FunctionCode.READ_HOLDING_REGISTERS:
-            return self._handle_read_registers(pdu, self.holding_registers)
+            words = self._read_registers(
+                decode_read_holding_registers_request(pdu), self.holding_registers
+            )
+            return encode_read_holding_registers_response(words)
         if fc == FunctionCode.READ_INPUT_REGISTERS:
-            return self._handle_read_registers(pdu, self.input_registers)
+            words = self._read_registers(
+                decode_read_input_registers_request(pdu), self.input_registers
+            )
+            return encode_read_input_registers_response(words)
         if fc == FunctionCode.WRITE_SINGLE_COIL:
             return self._handle_write_single_coil(pdu)
         if fc == FunctionCode.WRITE_SINGLE_REGISTER:
@@ -337,110 +334,74 @@ class MockSlave:
             return self._handle_write_multiple_registers(pdu)
         if fc == FunctionCode.DIAGNOSTICS:
             return self._handle_diagnostic_loopback(pdu)
-        raise _ServerException(ExceptionCode.ILLEGAL_FUNCTION)
+        raise ServerException(ExceptionCode.ILLEGAL_FUNCTION)
 
     def _handle_diagnostic_loopback(self, pdu: bytes) -> bytes:
         # FC 0x08 sub 0x0000 (Return Query Data): echo fc + subfn + data word.
-        if len(pdu) != _DIAG_REQUEST_PDU_LEN:
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
-        (subfn,) = struct.unpack(">H", pdu[1:3])
-        if subfn != _DIAG_SUBFN_RETURN_QUERY_DATA:
-            # We model sub-0 only; reject other sub-functions as the spec allows.
-            raise _ServerException(ExceptionCode.ILLEGAL_FUNCTION)
-        return pdu
+        if len(pdu) == _DIAG_REQUEST_PDU_LEN:
+            (subfn,) = struct.unpack(">H", pdu[1:3])
+            if subfn != _DIAG_SUBFN_RETURN_QUERY_DATA:
+                # We model sub-0 only; reject other sub-functions as the spec allows.
+                raise ServerException(ExceptionCode.ILLEGAL_FUNCTION)
+        return encode_diagnostic_loopback_response(decode_diagnostic_loopback_request(pdu))
 
-    def _handle_read_bits(self, pdu: bytes, bank: bytearray, bank_size: int) -> bytes:
-        fc, addr, count = struct.unpack(">BHH", pdu)
-        if not (1 <= count <= _MAX_READ_BITS):
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
-        if addr + count > bank_size:
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
-        nbytes = (count + 7) // 8
-        out = bytearray(nbytes)
-        for i in range(count):
-            src = addr + i
-            if bank[src >> 3] & (1 << (src & 7)):
-                out[i >> 3] |= 1 << (i & 7)
-        return bytes((fc, nbytes)) + bytes(out)
+    def _read_bits(self, request: ReadRequest, bank: bytearray, bank_size: int) -> list[bool]:
+        if request.count > self.limits.read_bits:
+            raise ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
+        if request.address + request.count > bank_size:
+            raise ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
+        return [
+            bool(bank[src >> 3] & (1 << (src & 7)))
+            for src in range(request.address, request.address + request.count)
+        ]
 
-    def _handle_read_registers(self, pdu: bytes, bank: list[int]) -> bytes:
-        fc, addr, count = struct.unpack(">BHH", pdu)
-        if not (1 <= count <= _MAX_READ_REGISTERS):
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
-        if addr + count > len(bank):
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
-        values = bank[addr : addr + count]
-        return bytes((fc, count * 2)) + struct.pack(f">{count}H", *values)
+    def _read_registers(self, request: ReadRequest, bank: list[int]) -> list[int]:
+        if request.count > self.limits.read_registers:
+            raise ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
+        if request.address + request.count > len(bank):
+            raise ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
+        return bank[request.address : request.address + request.count]
+
+    def _set_coil(self, address: int, *, on: bool) -> None:
+        if on:
+            self.coils[address >> 3] |= 1 << (address & 7)
+        else:
+            self.coils[address >> 3] &= (~(1 << (address & 7))) & 0xFF
 
     def _handle_write_single_coil(self, pdu: bytes) -> bytes:
-        _, addr, value = struct.unpack(">BHH", pdu)
-        if value not in (_COIL_ON, _COIL_OFF):
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
-        if addr >= self._coil_count:
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
-        if value == _COIL_ON:
-            self.coils[addr >> 3] |= 1 << (addr & 7)
-        else:
-            self.coils[addr >> 3] &= (~(1 << (addr & 7))) & 0xFF
-        return pdu  # FC 0x05 echoes the request
+        request = decode_write_single_coil_request(pdu)
+        if request.address >= self._coil_count:
+            raise ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
+        self._set_coil(request.address, on=request.on)
+        return encode_write_single_coil_response(request.address, on=request.on)
 
     def _handle_write_single_register(self, pdu: bytes) -> bytes:
-        _, addr, value = struct.unpack(">BHH", pdu)
-        if addr >= len(self.holding_registers):
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
-        self.holding_registers[addr] = value
-        return pdu  # FC 0x06 echoes the request
+        request = decode_write_single_register_request(pdu)
+        if request.address >= len(self.holding_registers):
+            raise ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
+        self.holding_registers[request.address] = request.value
+        return encode_write_single_register_response(request.address, request.value)
 
     def _handle_write_multiple_coils(self, pdu: bytes) -> bytes:
-        if len(pdu) < _WRITE_MULTIPLE_REQUEST_PREFIX_LEN:
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
-        fc, addr, count, byte_count = struct.unpack(
-            ">BHHB", pdu[:_WRITE_MULTIPLE_REQUEST_PREFIX_LEN]
-        )
-        data = pdu[_WRITE_MULTIPLE_REQUEST_PREFIX_LEN:]
-        if not (1 <= count <= _MAX_WRITE_COILS):
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
-        if byte_count != (count + 7) // 8 or len(data) != byte_count:
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
-        if addr + count > self._coil_count:
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
-        for i in range(count):
-            target = addr + i
-            bit = (data[i >> 3] >> (i & 7)) & 1
-            if bit:
-                self.coils[target >> 3] |= 1 << (target & 7)
-            else:
-                self.coils[target >> 3] &= (~(1 << (target & 7))) & 0xFF
-        return struct.pack(">BHH", fc, addr, count)
+        request = decode_write_multiple_coils_request(pdu)
+        count = len(request.values)
+        if count > self.limits.write_coils:
+            raise ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
+        if request.address + count > self._coil_count:
+            raise ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
+        for i, on in enumerate(request.values):
+            self._set_coil(request.address + i, on=on)
+        return encode_write_multiple_coils_response(request.address, count)
 
     def _handle_write_multiple_registers(self, pdu: bytes) -> bytes:
-        if len(pdu) < _WRITE_MULTIPLE_REQUEST_PREFIX_LEN:
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
-        fc, addr, count, byte_count = struct.unpack(
-            ">BHHB", pdu[:_WRITE_MULTIPLE_REQUEST_PREFIX_LEN]
-        )
-        data = pdu[_WRITE_MULTIPLE_REQUEST_PREFIX_LEN:]
-        if not (1 <= count <= _MAX_WRITE_REGISTERS):
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
-        if byte_count != count * 2 or len(data) != byte_count:
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
-        if addr + count > len(self.holding_registers):
-            raise _ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
-        values = struct.unpack(f">{count}H", data)
-        for i, v in enumerate(values):
-            self.holding_registers[addr + i] = v
-        return struct.pack(">BHH", fc, addr, count)
-
-    @staticmethod
-    async def _read_exact(stream: anyio.abc.ByteStream, n: int) -> bytes:
-        buf = bytearray()
-        while len(buf) < n:
-            chunk = await stream.receive(n - len(buf))
-            if not chunk:
-                # AnyIO contract: receive returns >=1 byte or raises EndOfStream.
-                raise anyio.EndOfStream
-            buf.extend(chunk)
-        return bytes(buf)
+        request = decode_write_multiple_registers_request(pdu)
+        count = len(request.values)
+        if count > self.limits.write_registers:
+            raise ServerException(ExceptionCode.ILLEGAL_DATA_VALUE)
+        if request.address + count > len(self.holding_registers):
+            raise ServerException(ExceptionCode.ILLEGAL_DATA_ADDRESS)
+        self.holding_registers[request.address : request.address + count] = request.values
+        return encode_write_multiple_registers_response(request.address, count)
 
 
-__all__ = ["MockSlave"]
+__all__ = ["MockSlave", "QuantityLimits", "ServerException"]

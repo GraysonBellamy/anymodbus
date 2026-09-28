@@ -26,7 +26,7 @@ from typing import Final
 import anyio
 import anyio.abc
 
-from anymodbus.exceptions import FrameError, LRCError
+from anymodbus.exceptions import ConfigurationError, FrameError, LRCError
 from anymodbus.lrc import lrc8_bytes, verify_lrc
 
 _LOGGER = logging.getLogger("anymodbus.bus")
@@ -60,10 +60,10 @@ def encode_ascii_adu(*, slave_address: int, pdu: bytes) -> bytes:
     """
     if not (0 <= slave_address <= _MAX_ADDRESS_BYTE):
         msg = f"slave_address must be in [0, 0xFF] (got {slave_address!r})"
-        raise ValueError(msg)
+        raise ConfigurationError(msg)
     if not pdu:
         msg = "pdu must not be empty"
-        raise ValueError(msg)
+        raise ConfigurationError(msg)
     body = bytes((slave_address,)) + pdu
     frame = body + lrc8_bytes(body)
     return b":" + frame.hex().upper().encode("ascii") + b"\r\n"
@@ -178,6 +178,26 @@ class AsciiFramer:
             if _LOGGER.isEnabledFor(logging.DEBUG):
                 _LOGGER.debug("rx (ascii) %s", raw.hex())
             return raw[0], raw[1:-1]  # strip the trailing LRC byte
+
+    async def read_request_adu(
+        self,
+        stream: anyio.abc.ByteStream,
+        *,
+        inter_char_idle: float,  # RTU rx-timing; ASCII is delimiter-framed, so unused (D5)
+    ) -> tuple[int, bytes]:
+        """Read one ASCII request frame for any slave address; return ``(slave, pdu)``.
+
+        For servers and test slaves. Raises :class:`LRCError` when the frame's
+        LRC fails and :class:`FrameError` for a frame that cannot be de-hexed;
+        either way the frame has been consumed up to its ``CRLF``.
+        """
+        raw = await read_ascii_frame(stream)
+        if not verify_lrc(raw):
+            msg = f"LRC mismatch on ASCII request to slave 0x{raw[0]:02x}"
+            raise LRCError(msg)
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug("rx (ascii request) %s", raw.hex())
+        return raw[0], raw[1:-1]
 
 
 #: Shared stateless ASCII framer singleton (returned by ``framing.get_framer``).

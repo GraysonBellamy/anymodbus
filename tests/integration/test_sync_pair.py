@@ -29,6 +29,8 @@ from anymodbus import (
     ConfigurationError,
     FrameTimeoutError,
     RetryPolicy,
+    TransactionInfo,
+    TransactionOutcome,
 )
 from anymodbus.bus import Bus as AsyncBus
 from anymodbus.sync import Bus as SyncBus
@@ -118,6 +120,19 @@ def test_sync_read_float_roundtrip(
     # ``math.isclose`` over ``pytest.approx`` because the latter's stubs
     # leak ``Unknown`` types under pyright strict mode.
     assert math.isclose(value, 78.295, rel_tol=1e-6)
+
+
+def test_sync_transaction_observer(
+    sync_pair: tuple[SyncBus, MockSlave],
+) -> None:
+    bus, _slave = sync_pair
+    events: list[TransactionInfo] = []
+    remove = bus.add_transaction_observer(events.append)
+    bus.slave(1).read_holding_registers(0, count=1)
+    remove()
+    bus.slave(1).read_holding_registers(0, count=1)
+    assert [e.outcome for e in events] == [TransactionOutcome.REPLY]
+    assert events[0].slave_address == 1
 
 
 def test_sync_diagnostic_loopback(

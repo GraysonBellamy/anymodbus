@@ -136,6 +136,7 @@ async def test_slave_rejects_oversize_quantity_with_illegal_data_value() -> None
                 slave_address=1,
                 request_pdu=bad_pdu,
                 expected_function_code=FunctionCode.READ_HOLDING_REGISTERS,
+                decode=bytes,
             )
 
 

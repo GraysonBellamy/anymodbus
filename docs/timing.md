@@ -64,9 +64,15 @@ Configured via `TimingConfig.broadcast_turnaround` (default 0.1 s = 100 ms). The
 
 `TimingConfig.post_tx_settle` (default 0) inserts a fixed wait between `stream.send` returning and the start of the rx loop. Most setups don't need it; some RS-485 transceivers benefit from a small (~ 0.5 ms) settling delay between de-asserting RTS and starting to listen.
 
+## Late-reply window
+
+After an attempt whose outcome is uncertain — a timeout, a cancellation, a CRC or framing error, or a reply that does not answer the request — the slave's real reply may still arrive. `TimingConfig.late_reply_window` (default 0, off) holds the next request back until that long after the uncertain attempt ended, reading and discarding anything that arrives, and until the line has been quiet for `inter_frame_idle`. Size it with `estimate_late_reply_window(baudrate=..., max_turnaround=..., max_reply_bytes=..., latency=...)`. See [Cancellation → Late replies](cancellation.md#late-replies) for the hazard it closes.
+
 ## When `"auto"` falls back
 
-If the stream isn't a serial port (e.g. `client_slave_pair` for tests, or the future Modbus TCP transport), the AnyIO typed-attribute lookup for the baudrate returns the fallback constant — the equivalent of 19200 baud. Override explicitly when you know better:
+`"auto"` reads the baud rate from the stream's `SerialStreamAttribute.config` typed attribute. An `anyserial.SerialPort` always publishes it — including both ends of `anyserial.testing.serial_port_pair()`, which `client_slave_pair` uses, so tests get the baud rate they configure. A wrapper stream can publish it too by forwarding its port's `extra_attributes`.
+
+If the stream doesn't publish it (an in-memory stream, a wrapper that doesn't forward `extra_attributes`, the future Modbus TCP transport), the lookup returns the fallback constant — the equivalent of 19200 baud. Override explicitly when you know better:
 
 ```python
 from anymodbus import BusConfig, TimingConfig
@@ -110,3 +116,9 @@ If your code **owns a serial port shared across protocols** (e.g. an `AUTO` mode
 ```python
 cfg = BusConfig(reset_input_buffer_before_request=False)
 ```
+
+For the same reason, leave `late_reply_window` at 0 on a shared port: the bus would read and discard the other reader's bytes during the window.
+
+## Wrapped streams: drain and input reset
+
+`drain_after_send` and `reset_input_buffer_before_request` act on any stream that has an async `drain()` / `reset_input_buffer()` method (described by `anymodbus.stream.SupportsDrain` and `SupportsResetInputBuffer`), not only on an `anyserial.SerialPort`. If you pass the bus a wrapper around a serial port, forward both methods — and `extra_attributes`, for the baud rate — or the bus loses drain-after-send (which matters for half-duplex RS-485) and the input reset. A wrapper with its own read buffer should clear it in `reset_input_buffer()` as well.

@@ -25,7 +25,8 @@ class ModbusError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Configuration errors — bad arguments to constructors / config dataclasses.
+# Configuration errors — bad arguments to constructors, config dataclasses,
+# codecs and request methods.
 #
 # Distinct from ProtocolError: nothing is on the wire yet. Inherits ValueError
 # so existing ``except ValueError`` blocks still catch it.
@@ -33,9 +34,13 @@ class ModbusError(Exception):
 
 
 class ConfigurationError(ModbusError, ValueError):
-    """Invalid configuration value passed to a constructor or config dataclass.
+    """An invalid argument or configuration value.
 
-    Raised eagerly during construction; never surfaces from a live transaction.
+    Raised by constructors and config dataclasses, by the PDU / ADU codecs and
+    register decoders, and by request methods whose arguments are out of range
+    (a register count above the spec maximum, a value that does not fit in a
+    register, a read function code passed to a broadcast). It is always raised
+    before anything is sent, so the bus and the slave are unaffected.
     """
 
 
@@ -78,16 +83,28 @@ class FrameTimeoutError(ModbusError, TimeoutError):
 
 
 class UnexpectedResponseError(ProtocolError):
-    """Slave address or function code echoed back did not match the request."""
+    """A checksum-valid reply that does not answer the request that was sent.
+
+    The function code differs from the request's, a register or coil read
+    returned a different quantity than was asked for, or a write's echo
+    (address, value or quantity) differs from the request. The usual cause is
+    a late reply to an earlier request; see
+    :attr:`anymodbus.TimingConfig.late_reply_window`.
+
+    On a write, the slave did answer, so the write may have been applied.
+    """
 
 
 class ModbusUnsupportedFunctionError(ModbusError, NotImplementedError):
     """A known Modbus function code that this client deliberately does not implement.
 
-    Distinct from :class:`IllegalFunctionError` (which the slave raises) — this
-    is raised locally by the framer or PDU codec when the caller asks for an
-    FC that ``anymodbus`` recognises but has not implemented (e.g., the
-    serial-line diagnostic FCs 0x07/0x0B/0x0C/0x11/0x18). Inherits
+    Distinct from :class:`IllegalFunctionError` (which the slave raises): this
+    is for the client declining to *send* a request whose function code
+    ``anymodbus`` recognises but does not implement (e.g., the serial-line
+    diagnostic FCs 0x07/0x0B/0x0C/0x11/0x18). No public method sends such a
+    request, so nothing in ``anymodbus`` raises it today. A *reply* carrying
+    one of these codes is not this error: it surfaces as :class:`CRCError`
+    (line damage) or :class:`UnexpectedResponseError`. Inherits
     :class:`NotImplementedError` so generic ``except NotImplementedError``
     handlers still catch it.
     """
@@ -100,6 +117,21 @@ class ModbusUnsupportedFunctionError(ModbusError, NotImplementedError):
 
 class ConnectionLostError(ModbusError, anyio.BrokenResourceError):
     """The underlying stream disconnected mid-transaction."""
+
+
+class TransportError(ConnectionLostError, OSError):
+    """The stream raised an operating-system error during a transaction.
+
+    Covers port failures that are not already a disconnect or a close: for
+    example an :class:`anyserial.SerialError` for an errno or Windows error
+    code that ``anyserial`` does not map to ``SerialDisconnectedError``, or a
+    failing ``drain`` / ``reset_input_buffer``. The original exception is the
+    ``__cause__``, and its ``errno`` is copied when it has one.
+
+    It is a :class:`ConnectionLostError` (so an :class:`anyio.BrokenResourceError`)
+    because the port is in an unknown state, and an :class:`OSError` so that
+    ``except OSError`` handlers written for the raw error keep working.
+    """
 
 
 class BusClosedError(ModbusError, anyio.ClosedResourceError):
@@ -308,6 +340,7 @@ __all__ = [
     "ProtocolError",
     "SlaveDeviceBusyError",
     "SlaveDeviceFailureError",
+    "TransportError",
     "UnexpectedResponseError",
     "code_to_exception",
     "is_exception_response",

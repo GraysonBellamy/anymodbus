@@ -37,7 +37,32 @@ If a transaction is cancelled mid-flight (outer scope, KeyboardInterrupt, task g
 2. The `async with bus._lock:` releases cleanly.
 3. The next caller acquires the lock, enforces the inter-frame idle gap as usual, and proceeds.
 
-The bus stays usable. There is no corrupted-state recovery ritual to perform.
+The bus stays usable, with one hazard to know about: the slave may still answer.
+
+## Late replies
+
+A request that timed out or was cancelled was usually still received by the slave, and its reply may still be on its way. The bus flushes the input buffer before each request, but that only removes bytes that have *already* arrived. A reply that lands after the next request went out is read as that request's reply:
+
+- **Same function code and length** (for example two FC 03 reads of the same count at different addresses): it is accepted. An FC 03/04 reply carries no register address, so the second read silently returns the first read's data.
+- **Different function code or length**: `UnexpectedResponseError`.
+
+The same applies after any reply the bus could not use — a CRC or framing error, or a reply that did not answer the request — because the real reply may follow it.
+
+Set `TimingConfig.late_reply_window` to close the gap. After an attempt whose outcome is uncertain, the bus sends nothing until that long after the attempt ended; meanwhile it reads and discards whatever arrives, and it also waits until the line has been quiet for the inter-frame gap. A normal reply or a Modbus exception response leaves the line in a known state and opens no window, and neither does an attempt cancelled before its request was sent. Retries wait out the window too, so a retried read never takes the previous attempt's reply.
+
+```python
+from anymodbus import BusConfig, TimingConfig, estimate_late_reply_window
+
+window = estimate_late_reply_window(
+    baudrate=38_400,
+    max_turnaround=0.030,  # the device's slowest reply, from its manual
+    max_reply_bytes=133,  # the largest reply you read (here 64 registers)
+    latency=0.016,  # a USB adapter's latency timer
+)
+config = BusConfig(timing=TimingConfig(late_reply_window=window))  # ~0.08 s
+```
+
+The window is measured from the end of the uncertain attempt, never earlier than its request was sent, so it only has to cover one request-to-end-of-reply time. The cost is paid only after a failure. Leave it at 0 on a port shared with another reader (`reset_input_buffer_before_request=False`): the discard would consume that reader's bytes. A transaction observer reports each request's `discarded_bytes`, so you can see when a late reply was caught.
 
 ## Cancel a fan-out
 
@@ -58,7 +83,9 @@ Each task serializes through the bus lock; the outer `fail_after` cancels every 
 (retries + 1) * (request_timeout + inter_frame_idle + retry_policy.backoff_base)
 ```
 
-If you wrap a call in `anyio.fail_after(deadline)` shorter than that, the outer scope wins — retries respect outer cancellation.
+If you wrap a call in `anyio.fail_after(deadline)` shorter than that, the outer scope wins — retries respect outer cancellation. With a `late_reply_window`, add it once per retry after an uncertain attempt.
+
+To count retries and recovered errors, register a [transaction observer](observers.md): it reports every attempt, with `will_retry` and the attempt number.
 
 ## Cancellation vs the broadcast turnaround
 
@@ -66,5 +93,5 @@ If you wrap a call in `anyio.fail_after(deadline)` shorter than that, the outer 
 
 ## What `anymodbus` does NOT do
 
-- **No automatic reconnection.** If `stream.send` raises `BrokenResourceError`, the bus surfaces `ConnectionLostError` and the bus is dead — open a new one. Auto-reconnect is on the v0.2/v0.3 roadmap as a thin `ResilientBus` wrapper. (`pymodbus` reconnects after `retries+3` consecutive timeouts; we deliberately do not.)
+- **No automatic reconnection.** If the stream reports a disconnect (`BrokenResourceError`) or another OS-level port failure, the bus surfaces `ConnectionLostError` (the latter as its subclass `TransportError`) — treat the port as gone and open a new bus. Auto-reconnect is on the roadmap as a thin `ResilientBus` wrapper. (`pymodbus` reconnects after `retries+3` consecutive timeouts; we deliberately do not.)
 - **No internal retry loop independent of `RetryPolicy`.** What you configure is what runs.

@@ -28,6 +28,7 @@ import struct
 from typing import TYPE_CHECKING, cast
 
 from anymodbus._types import ByteOrder, RegisterType, WordOrder
+from anymodbus.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -62,11 +63,11 @@ _REGISTER_VALUE_MAX = 0xFFFF
 def _validate_words(words: Sequence[int], expected: int) -> None:
     if len(words) != expected:
         msg = f"need exactly {expected} register(s) (got {len(words)})"
-        raise ValueError(msg)
+        raise ConfigurationError(msg)
     for w in words:
         if not (0 <= w <= _REGISTER_VALUE_MAX):
             msg = f"register value must be in [0, 0xFFFF] (got {w!r})"
-            raise ValueError(msg)
+            raise ConfigurationError(msg)
 
 
 def _pack_words(words: Sequence[int], *, word_order: WordOrder, byte_order: ByteOrder) -> bytes:
@@ -91,18 +92,18 @@ def _unpack_to_words(
 
 
 def _check_int_range(value: int, *, signed: bool, bits: int) -> None:
-    """Raise ``ValueError`` if ``value`` doesn't fit in a (signed/unsigned) ``bits``-bit integer."""
+    """Raise ``ConfigurationError`` if ``value`` doesn't fit in a ``bits``-bit integer."""
     if signed:
         lo = -(1 << (bits - 1))
         hi = (1 << (bits - 1)) - 1
         if not (lo <= value <= hi):
             msg = f"signed int{bits} value must be in [{lo}, {hi}] (got {value!r})"
-            raise ValueError(msg)
+            raise ConfigurationError(msg)
     else:
         hi = (1 << bits) - 1
         if not (0 <= value <= hi):
             msg = f"unsigned int{bits} value must be in [0, {hi}] (got {value!r})"
-            raise ValueError(msg)
+            raise ConfigurationError(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +310,7 @@ def decode_string(
     for w in words:
         if not (0 <= w <= _REGISTER_VALUE_MAX):
             msg = f"register value must be in [0, 0xFFFF] (got {w!r})"
-            raise ValueError(msg)
+            raise ConfigurationError(msg)
     fmt = ">" if byte_order is ByteOrder.BIG else "<"
     raw = struct.pack(f"{fmt}{len(words)}H", *words)
     if strip_null:
@@ -341,28 +342,28 @@ def encode_string(
     """
     if (register_count is None) == (byte_count is None):
         msg = "supply exactly one of register_count or byte_count"
-        raise ValueError(msg)
+        raise ConfigurationError(msg)
     if len(pad) != 1:
         msg = f"pad must be exactly one byte (got {pad!r})"
-        raise ValueError(msg)
+        raise ConfigurationError(msg)
     if register_count is not None:
         if register_count < 1:
             msg = f"register_count must be at least 1 (got {register_count!r})"
-            raise ValueError(msg)
+            raise ConfigurationError(msg)
         target_bytes = register_count * _BYTES_PER_REGISTER
         rc = register_count
     else:
         assert byte_count is not None
         if byte_count < 1:
             msg = f"byte_count must be at least 1 (got {byte_count!r})"
-            raise ValueError(msg)
+            raise ConfigurationError(msg)
         target_bytes = byte_count
         rc = (byte_count + 1) // 2
 
     raw = value.encode(encoding)
     if len(raw) > target_bytes:
         msg = f"encoded value is {len(raw)} bytes; does not fit in {target_bytes} bytes"
-        raise ValueError(msg)
+        raise ConfigurationError(msg)
     raw = raw.ljust(rc * _BYTES_PER_REGISTER, pad)
     fmt = ">" if byte_order is ByteOrder.BIG else "<"
     return struct.unpack(f"{fmt}{rc}H", raw)
@@ -474,10 +475,10 @@ def encode(  # noqa: PLR0911 — one branch per RegisterType is the clearest sha
             f"register_count={register_count} disagrees with the natural "
             f"register count for {type.value} ({expected})"
         )
-        raise ValueError(msg)
+        raise ConfigurationError(msg)
     if byte_count is not None:
         msg = f"byte_count is only meaningful for STRING (got type={type.value})"
-        raise ValueError(msg)
+        raise ConfigurationError(msg)
 
     match type:
         case RegisterType.INT16:

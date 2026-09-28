@@ -71,8 +71,23 @@ class Framer(Protocol):
         Raises (framing-level only): :class:`FrameError` (truncated /
         un-de-hexable / no terminator), :class:`CRCError` / :class:`LRCError`
         (checksum failed on a frame addressed to us), :class:`ProtocolError`
-        (``fc == 0``, unframeable), :class:`ModbusUnsupportedFunctionError`
-        (RTU: response FC has no length table).
+        (``fc == 0``, unframeable).
+        """
+        ...
+
+    async def read_request_adu(
+        self,
+        stream: anyio.abc.ByteStream,
+        *,
+        inter_char_idle: float,
+    ) -> tuple[int, bytes]:
+        """Read ONE request frame, for any slave address; return ``(slave, pdu)``.
+
+        The server-side counterpart of :meth:`read_adu`, for test slaves and
+        simulators: frames by request length, verifies the checksum, and does
+        not filter by address. Raises :class:`ChecksumError` for a bad
+        checksum (the damaged frame is consumed) and :class:`FrameError` for
+        a frame that cannot be read.
         """
         ...
 

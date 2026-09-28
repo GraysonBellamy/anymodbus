@@ -8,7 +8,16 @@ in user code.
 from __future__ import annotations
 
 from anymodbus._mock.faults import FaultPlan
-from anymodbus._mock.pair import client_slave_pair
-from anymodbus._mock.slave import MockSlave
+from anymodbus._mock.pair import client_server_pair, client_slave_pair
+from anymodbus._mock.server import MockServer
+from anymodbus._mock.slave import MockSlave, QuantityLimits, ServerException
 
-__all__ = ["FaultPlan", "MockSlave", "client_slave_pair"]
+__all__ = [
+    "FaultPlan",
+    "MockServer",
+    "MockSlave",
+    "QuantityLimits",
+    "ServerException",
+    "client_server_pair",
+    "client_slave_pair",
+]
