@@ -41,7 +41,7 @@ Reference values for the spec-recommended baudrates:
 
 ## Tx-side enforcement
 
-The bus records `_last_io_monotonic` after every send and every receive. Before the next tx:
+The bus records `_last_io_monotonic` when each transaction ends, however it ended: a reply, an exception response, a checksum or framing error, a timeout or a cancellation. After a broadcast it is recorded once the turnaround delay has passed. Before the next tx:
 
 ```
 elapsed = anyio.current_time() - last_io_monotonic
