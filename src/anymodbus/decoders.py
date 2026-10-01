@@ -120,8 +120,9 @@ def decode_float32(
     """Decode two 16-bit register words as an IEEE 754 float32."""
     _validate_words(words, _REGISTERS_PER_32BIT)
     canonical = _pack_words(words, word_order=word_order, byte_order=byte_order)
+    value: float
     (value,) = struct.unpack(">f", canonical)
-    return cast("float", value)
+    return value
 
 
 def encode_float32(
@@ -152,8 +153,9 @@ def decode_float64(
     """Decode four 16-bit register words as an IEEE 754 float64."""
     _validate_words(words, _REGISTERS_PER_64BIT)
     canonical = _pack_words(words, word_order=word_order, byte_order=byte_order)
+    value: float
     (value,) = struct.unpack(">d", canonical)
-    return cast("float", value)
+    return value
 
 
 def encode_float64(
